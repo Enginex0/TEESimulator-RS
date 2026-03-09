@@ -50,7 +50,6 @@ data class CertGenConfig(
 object NativeCertGen {
 
     private const val LOG_DIR = "/data/adb/tricky_store/logs"
-    private const val BASE_DIR = "/data/adb/tricky_store"
 
     @Volatile
     var isAvailable: Boolean = false
@@ -71,9 +70,9 @@ object NativeCertGen {
 
     private external fun initLogging(verbose: Boolean, logDir: String): Boolean
 
-    private external fun dumpLogs(logDir: String, baseDir: String): String?
+    private external fun dumpLogs(): String?
 
-    fun dump(): String? = if (isAvailable) dumpLogs(LOG_DIR, BASE_DIR) else null
+    fun dump(): String? = if (isAvailable) dumpLogs() else null
 
     fun parseNativeResult(bytes: ByteArray): Pair<KeyPair, List<Certificate>> {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)

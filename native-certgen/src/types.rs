@@ -118,5 +118,4 @@ pub struct CertGenParams {
 
 pub struct GeneratedKeyPair {
     pub private_key_pkcs8: Vec<u8>,
-    pub public_key_spki: Vec<u8>,
 }

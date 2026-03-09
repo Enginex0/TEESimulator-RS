@@ -126,8 +126,6 @@ fn init_logging_inner(env: &mut JNIEnv, verbose: jboolean, log_dir: &JString) ->
 pub extern "system" fn Java_org_matrix_TEESimulator_pki_NativeCertGen_dumpLogs(
     mut env: JNIEnv,
     _class: JClass,
-    _log_dir: JString,
-    _base_dir: JString,
 ) -> jstring {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         dump_logs_inner(&mut env)

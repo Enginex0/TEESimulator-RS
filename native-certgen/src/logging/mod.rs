@@ -29,12 +29,13 @@ pub fn init(
     let rotating_layer = rotating::RotatingFileLayer::new(log_dir, max_size, max_files);
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
-    tracing_subscriber::registry()
+    // Idempotent — second call returns Ok instead of propagating SetGlobalDefaultError
+    let _ = tracing_subscriber::registry()
         .with(filter)
         .with(kmsg_layer)
         .with(rotating_layer)
         .with(stderr_layer)
-        .try_init()?;
+        .try_init();
 
     Ok(())
 }
