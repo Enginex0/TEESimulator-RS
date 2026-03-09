@@ -68,6 +68,7 @@ ui_print "- Extracting $ARCH libraries"
 install_file "lib/$ABI_DIR/libTEESimulator.so" "$MODPATH"
 install_file "lib/$ABI_DIR/libinject.so" "$MODPATH"
 install_file "lib/$ABI_DIR/libsupervisor.so" "$MODPATH"
+install_file "lib/$ABI_DIR/libcertgen.so" "$MODPATH"
 ui_print ""
 
 mv "$MODPATH/libinject.so" "$MODPATH/inject"

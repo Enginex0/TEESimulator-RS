@@ -71,6 +71,35 @@ dependencies {
     implementation(libs.bcpkix)
 }
 
+// --- Rust native cert gen build task ---
+val buildRustCertgen by tasks.registering(Exec::class) {
+    group = "TEESimulator Native Build"
+    description = "Builds libcertgen.so via cargo-ndk for arm64-v8a."
+
+    workingDir = rootProject.projectDir.resolve("native-certgen")
+
+    commandLine(
+        "cargo", "ndk",
+        "-t", "arm64-v8a",
+        "-o", rootProject.projectDir.resolve("app/src/main/jniLibs").absolutePath,
+        "build", "--release"
+    )
+
+    inputs.dir(rootProject.projectDir.resolve("native-certgen/src"))
+    inputs.file(rootProject.projectDir.resolve("native-certgen/Cargo.toml"))
+    inputs.file(rootProject.projectDir.resolve("native-certgen/Cargo.lock"))
+    outputs.dir(rootProject.projectDir.resolve("app/src/main/jniLibs"))
+
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
+}
+
+// AGP auto-detects jniLibs/ as an input to mergeJniLibFolders — wire the dependency
+tasks.configureEach {
+    if (name.endsWith("JniLibFolders") && name.startsWith("merge")) {
+        dependsOn(buildRustCertgen)
+    }
+}
+
 androidComponents {
     onVariants(selector().all()) { variant ->
         val capitalized = variant.name.replaceFirstChar { it.uppercase() }
@@ -94,6 +123,7 @@ androidComponents {
                     dependsOn("minify${capitalized}WithR8")
                 }
                 dependsOn("strip${capitalized}DebugSymbols")
+                dependsOn(buildRustCertgen)
 
                 if (isDebug) {
                     from(variant.artifacts.get(SingleArtifact.APK)) {
@@ -116,7 +146,7 @@ androidComponents {
                     )
                 ) {
                     into("lib") // Place them in the 'lib' subfolder of the staging directory.
-                    include("**/libinject.so", "**/libTEESimulator.so", "**/libsupervisor.so")
+                    include("**/libinject.so", "**/libTEESimulator.so", "**/libsupervisor.so", "**/libcertgen.so")
                 }
 
                 // Now, copy and process the files from 'module' directory.
