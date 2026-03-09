@@ -1,0 +1,33 @@
+[package]
+name = "certgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = { version = "0.21.1", default-features = false }
+ring = "0.17.14"
+rsa = { version = "0.9", features = ["sha2"] }
+pkcs8 = { version = "0.10", features = ["alloc"] }
+rand = "0.8"
+rcgen = { version = "0.13.2", default-features = false, features = ["ring"] }
+der = { version = "0.7.10", features = ["alloc", "oid"] }
+const-oid = "0.9.6"
+x509-cert = { version = "0.2.5", features = ["pem"] }
+time = { version = "0.3", features = ["std"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
