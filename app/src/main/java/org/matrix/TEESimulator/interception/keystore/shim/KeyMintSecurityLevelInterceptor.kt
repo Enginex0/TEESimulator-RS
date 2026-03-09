@@ -8,6 +8,7 @@ import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
 import android.system.keystore2.*
+import android.util.Pair as AndroidPair
 import java.io.ByteArrayInputStream
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -17,6 +18,7 @@ import java.security.cert.CertificateFactory
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import org.matrix.TEESimulator.attestation.AttestationBuilder
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -24,8 +26,12 @@ import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.pki.CertGenConfig
 import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.pki.CertificateHelper
+import org.matrix.TEESimulator.pki.KeyBoxManager
+import org.matrix.TEESimulator.pki.NativeCertGen
+import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 class KeyMintSecurityLevelInterceptor(
     private val original: IKeystoreSecurityLevel,
@@ -296,9 +302,16 @@ class KeyMintSecurityLevelInterceptor(
         keyDescriptor.nspace = secureRandom.nextLong()
         SystemLogger.info("Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}].")
 
-        val keyData = CertificateGenerator.generateAttestedKeyPair(
-            callingUid, keyDescriptor.alias, attestationKey?.alias, parsedParams, securityLevel,
-        ) ?: throw Exception("CertificateGenerator failed to create key pair.")
+        val keyData = if (NativeCertGen.isAvailable && attestationKey == null) {
+            generateAttestedKeyPairNative(callingUid, parsedParams)
+                ?: CertificateGenerator.generateAttestedKeyPair(
+                    callingUid, keyDescriptor.alias, attestationKey?.alias, parsedParams, securityLevel,
+                )
+        } else {
+            CertificateGenerator.generateAttestedKeyPair(
+                callingUid, keyDescriptor.alias, attestationKey?.alias, parsedParams, securityLevel,
+            )
+        } ?: throw Exception("Both native and BouncyCastle cert gen failed.")
 
         cleanupKeyData(keyId)
         val response = buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
@@ -320,6 +333,74 @@ class KeyMintSecurityLevelInterceptor(
         )
 
         return InterceptorUtils.createTypedObjectReply(response.metadata)
+    }
+
+    private fun generateAttestedKeyPairNative(
+        callingUid: Int,
+        params: KeyMintAttestation,
+    ): AndroidPair<KeyPair, List<Certificate>>? {
+        return runCatching {
+            val algorithmName = when (params.algorithm) {
+                Algorithm.EC -> "EC"
+                Algorithm.RSA -> "RSA"
+                else -> return null
+            }
+            val keyboxFile = ConfigurationManager.getKeyboxFileForUid(callingUid)
+            val keybox = KeyBoxManager.getAttestationKey(keyboxFile, algorithmName) ?: return null
+
+            val keyboxPrivateKeyBytes = keybox.keyPair.private.encoded
+            val keyboxCertChainBytes = keybox.certificates
+                .map { it.encoded }
+                .fold(ByteArray(0)) { acc, der -> acc + der }
+
+            val attestVersion = AndroidDeviceUtils.getAttestVersion(securityLevel)
+            val keymasterVersion = AndroidDeviceUtils.getKeymasterVersion(securityLevel)
+            val appId = AttestationBuilder.createApplicationId(callingUid)
+
+            val config = CertGenConfig(
+                algorithm = params.algorithm,
+                keySize = params.keySize,
+                ecCurve = params.ecCurve,
+                rsaPublicExponent = params.rsaPublicExponent?.toLong() ?: 65537L,
+                attestationChallenge = params.attestationChallenge,
+                purposes = params.purpose.toIntArray(),
+                digests = params.digest.toIntArray(),
+                certSerial = params.certificateSerial?.toByteArray(),
+                certSubject = params.certificateSubject?.encoded,
+                certNotBefore = params.certificateNotBefore?.time ?: -1L,
+                certNotAfter = params.certificateNotAfter?.time ?: -1L,
+                keyboxPrivateKey = keyboxPrivateKeyBytes,
+                keyboxCertChain = keyboxCertChainBytes,
+                securityLevel = securityLevel,
+                attestVersion = attestVersion,
+                keymasterVersion = keymasterVersion,
+                osVersion = AndroidDeviceUtils.osVersion,
+                osPatchLevel = AndroidDeviceUtils.getPatchLevel(callingUid),
+                vendorPatchLevel = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid),
+                bootPatchLevel = AndroidDeviceUtils.getBootPatchLevelLong(callingUid),
+                bootKey = AndroidDeviceUtils.bootKey,
+                bootHash = AndroidDeviceUtils.bootHash,
+                creationDatetime = System.currentTimeMillis(),
+                attestationApplicationId = appId.octets,
+                moduleHash = if (attestVersion >= 400) AndroidDeviceUtils.moduleHash else null,
+                idBrand = params.brand,
+                idDevice = params.device,
+                idProduct = params.product,
+                idSerial = params.serial,
+                idImei = params.imei,
+                idMeid = params.meid,
+                idManufacturer = params.manufacturer,
+                idModel = params.model,
+                idSecondImei = if (attestVersion >= 300) params.secondImei else null,
+            )
+
+            val resultBytes = NativeCertGen.generateAttestedKeyPair(config) ?: return null
+            val (keyPair, certs) = NativeCertGen.parseNativeResult(resultBytes)
+            SystemLogger.info("NativeCertGen: generated key pair successfully (${certs.size} certs)")
+            AndroidPair(keyPair, certs)
+        }.onFailure {
+            SystemLogger.error("NativeCertGen: generation failed, falling back to BouncyCastle", it)
+        }.getOrNull()
     }
 
     private fun buildKeyEntryResponse(

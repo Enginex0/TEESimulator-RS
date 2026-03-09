@@ -345,7 +345,7 @@ object AttestationBuilder {
      *   retrieved.
      */
     @Throws(Throwable::class)
-    private fun createApplicationId(uid: Int): DEROctetString {
+    internal fun createApplicationId(uid: Int): DEROctetString {
         val pm =
             ConfigurationManager.getPackageManager()
                 ?: throw IllegalStateException("PackageManager not found!")
