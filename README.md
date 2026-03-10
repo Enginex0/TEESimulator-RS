@@ -3,7 +3,8 @@
   <p align="center"><b>Full TEE Emulation for Rooted Android</b></p>
   <p align="center">Hardware attestation. Software keys. Zero detection.</p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-v4.0-blue?style=for-the-badge" alt="v4.0">
+    <a href="https://github.com/Enginex0/TEESimulator/actions/workflows/build.yml"><img src="https://github.com/Enginex0/TEESimulator/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+    <img src="https://img.shields.io/badge/version-v4.2-blue?style=for-the-badge" alt="v4.2">
     <img src="https://img.shields.io/badge/Android-10%2B-green?style=for-the-badge&logo=android" alt="Android 10+">
     <img src="https://img.shields.io/badge/Telegram-community-blue?style=for-the-badge&logo=telegram" alt="Telegram">
   </p>
@@ -109,6 +110,24 @@ The result: **apps that verify hardware attestation see a legitimate, unmodified
 5. **Verify** — check Play Integrity or run Key Attestation Demo
 
 TEESimulator replaces TrickyStore, TrickyStoreOSS, and their forks. Existing config files are compatible.
+
+---
+
+## 🔨 Building from Source
+
+The CI workflow builds on every push to `main`. You can also build locally or trigger a build from your own fork.
+
+**Prerequisites:** JDK 21, Android SDK/NDK 27, Rust stable with `aarch64-linux-android` target, `cargo-ndk`.
+
+```bash
+git clone https://github.com/Enginex0/TEESimulator.git
+cd TEESimulator
+./gradlew zipRelease zipDebug
+```
+
+Output ZIPs land in `out/`. The Gradle build automatically invokes `cargo ndk` to cross-compile `libcertgen.so` before packaging.
+
+To rebuild from a fork, push to `main` or use **Actions → Build → Run workflow**. The workflow installs all toolchains (Java, Rust, cargo-ndk, ccache) and uploads Release + Debug ZIPs as artifacts.
 
 ---
 
