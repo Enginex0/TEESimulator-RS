@@ -121,8 +121,8 @@ androidComponents {
                     dependsOn("package${capitalized}")
                 } else {
                     dependsOn("minify${capitalized}WithR8")
+                    dependsOn("strip${capitalized}DebugSymbols")
                 }
-                dependsOn("strip${capitalized}DebugSymbols")
                 dependsOn(buildRustCertgen)
 
                 if (isDebug) {
@@ -140,12 +140,13 @@ androidComponents {
                     }
                 }
 
-                from(
-                    project.layout.buildDirectory.dir(
-                        "intermediates/stripped_native_libs/${variant.name}/strip${capitalized}DebugSymbols/out/lib"
-                    )
-                ) {
-                    into("lib") // Place them in the 'lib' subfolder of the staging directory.
+                val nativeLibsDir = if (isDebug) {
+                    "intermediates/merged_native_libs/${variant.name}/merge${capitalized}NativeLibs/out/lib"
+                } else {
+                    "intermediates/stripped_native_libs/${variant.name}/strip${capitalized}DebugSymbols/out/lib"
+                }
+                from(project.layout.buildDirectory.dir(nativeLibsDir)) {
+                    into("lib")
                     include("**/libinject.so", "**/libTEESimulator.so", "**/libsupervisor.so", "**/libcertgen.so")
                 }
 
