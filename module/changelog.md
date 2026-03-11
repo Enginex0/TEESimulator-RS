@@ -1,3 +1,13 @@
+## TEESimulator v4.3: Performance & Reliability
+
+- **Debug log gating** — `SystemLogger.debug()` now skipped entirely in release builds, eliminating unnecessary logcat syscalls on every intercepted transaction.
+- **Supervisor backoff** — Exponential restart delay (500ms → 30s cap) prevents CPU spin if the daemon crashes repeatedly. Resets automatically once stable.
+- **Process priority** — Daemon runs at nice=10, yielding CPU to foreground apps on constrained devices.
+- **Map eviction** — Rate limiter and file lock maps now evict stale entries instead of growing unbounded.
+- **CI pipeline** — Single-trigger build→release pipeline with proper changelog extraction and correctly sized artifacts.
+
+---
+
 ## TEESimulator v4.2: Detection Evasion Hardening
 
 Fixes 6 detection vectors flagged by attestation validator apps.
