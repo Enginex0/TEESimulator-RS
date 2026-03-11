@@ -3,16 +3,10 @@ name: Build
 on:
   push:
     branches: [ "main" ]
-    paths-ignore:
-      - '**.md'
-      - '.github/**'
-      - '!.github/workflows/**'
+    paths-ignore: [ '**.md' ]
   pull_request:
     branches: [ "main" ]
-    paths-ignore:
-      - '**.md'
-      - '.github/**'
-      - '!.github/workflows/**'
+    paths-ignore: [ '**.md' ]
   workflow_dispatch:
 
 concurrency:
@@ -120,7 +114,7 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
