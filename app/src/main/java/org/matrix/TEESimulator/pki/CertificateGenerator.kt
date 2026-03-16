@@ -239,10 +239,10 @@ object CertificateGenerator {
         )
 
         val signerAlgorithm =
-            when (params.algorithm) {
-                Algorithm.EC -> "SHA256withECDSA"
-                Algorithm.RSA -> "SHA256withRSA"
-                else -> throw IllegalArgumentException("Unsupported algorithm: ${params.algorithm}")
+            when (signingKeyPair.private.algorithm) {
+                "EC" -> "SHA256withECDSA"
+                "RSA" -> "SHA256withRSA"
+                else -> throw IllegalArgumentException("Unsupported signing key: ${signingKeyPair.private.algorithm}")
             }
         val contentSigner =
             JcaContentSignerBuilder(signerAlgorithm)

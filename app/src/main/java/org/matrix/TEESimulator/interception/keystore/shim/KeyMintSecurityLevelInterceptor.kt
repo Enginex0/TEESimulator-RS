@@ -260,10 +260,8 @@ class KeyMintSecurityLevelInterceptor(
                     return InterceptorUtils.createErrorReply(RESPONSE_INVALID_ARGUMENT)
                 }
 
-                if (parsedParams.serial != null || parsedParams.imei != null ||
-                    parsedParams.meid != null || parsedParams.secondImei != null ||
-                    params.any { it.tag == Tag.DEVICE_UNIQUE_ATTESTATION }) {
-                    SystemLogger.warning("[TX_ID: $txId] Rejecting device ID attestation for uid=$callingUid")
+                if (params.any { it.tag == Tag.DEVICE_UNIQUE_ATTESTATION }) {
+                    SystemLogger.warning("[TX_ID: $txId] Rejecting DEVICE_UNIQUE_ATTESTATION for uid=$callingUid")
                     return InterceptorUtils.createErrorReply(KEYMINT_CANNOT_ATTEST_IDS)
                 }
 
