@@ -1,3 +1,17 @@
+## TEESimulator-RS v4.8: StrongBox Hardening & LRU Pruning
+
+Tested against DuckDetector on OnePlus (Android 16, KSU). Tamper score dropped from 32 to 8.
+
+- **LRU operation pruning** — Concurrent software operations capped at 15 per UID (TEE) and 4 per UID (StrongBox), with oldest-first eviction. Pruned operations return `INVALID_OPERATION_HANDLE (-28)`, matching AOSP keystore2 malus-based pruning.
+- **StrongBox param guard** — Unsupported StrongBox params (RSA >2048-bit, non-P256 EC curves) forwarded to real HAL for proper rejection instead of generating in software.
+- **StrongBox timing** — Key generation floors at 250ms, signing at 80ms on StrongBox security level to match real secure element latency.
+- **StrongBox op limit** — Sliding-window enforcer caps concurrent StrongBox operations for both software and hardware key paths, returning `TOO_MANY_OPERATIONS (-29)` when exceeded.
+- **ECDSA algorithm alias** — Accept "ECDSA" in addition to "EC" as JCA private key algorithm name. Fixes SIGSEGV crash on Android 10 devices where the provider reports EC keys as "ECDSA". Closes #4.
+- **createOperation domain handling** — Software-generated keys now found via both `Domain.APP` (alias) and `Domain.KEY_ID` (nspace) lookup paths.
+- **Permission guards** — Device ID attestation tags (IMEI, MEID, serial) require caller permission checks.
+
+---
+
 ## TEESimulator-RS v4.7: Operation & Attestation Fixes
 
 Tested against [KeyDetector](https://github.com/XiaoTong6666/KeyDetector) and [Key Attestation](https://github.com/nickel-lang/nickel) on OnePlus (Android 16) and Xiaomi Redmi 14C (Android 14).
