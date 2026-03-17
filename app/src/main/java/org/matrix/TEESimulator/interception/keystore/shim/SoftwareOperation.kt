@@ -223,7 +223,7 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
 
 private object KeystoreErrorCodes {
     val tooMuchData: Int by lazy {
-        resolveField("android.system.keystore2.ResponseCode", "TOO_MUCH_DATA", 29)
+        resolveField("android.system.keystore2.ResponseCode", "TOO_MUCH_DATA", 21)
     }
 
     val invalidOperationHandle: Int by lazy {
