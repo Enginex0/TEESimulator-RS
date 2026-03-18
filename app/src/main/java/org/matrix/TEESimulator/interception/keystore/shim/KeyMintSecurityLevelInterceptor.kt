@@ -267,6 +267,8 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
+        trackAndEnforceOpLimit(callingUid, txId)?.let { return it }
+
         SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for uid=$callingUid.")
 
         val params = data.createTypedArray(KeyParameter.CREATOR)!!
