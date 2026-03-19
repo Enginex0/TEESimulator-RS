@@ -1,3 +1,45 @@
+## TEESimulator-RS v5.0: AOSP Compliance Overhaul
+
+Major release integrating 30+ AOSP compliance improvements from upstream PR #157 analysis, layered on top of our StrongBox hardening and native cert gen architecture.
+
+### Attestation Extension Alignment
+- 17 enforcement tags added to KeyMintAttestation (ACTIVE_DATETIME, ORIGINATION_EXPIRE, USAGE_EXPIRE, USAGE_COUNT_LIMIT, CALLER_NONCE, UNLOCKED_DEVICE_REQUIRED, INCLUDE_UNIQUE_ID, ROLLBACK_RESISTANCE, EARLY_BOOT_ONLY, ALLOW_WHILE_ON_BODY, TRUSTED_USER_PRESENCE_REQUIRED, TRUSTED_CONFIRMATION_REQUIRED, NO_AUTH_REQUIRED, MAX_USES_PER_BOOT, MAX_BOOT_LEVEL, MIN_MAC_LENGTH, RSA_OAEP_MGF_DIGEST)
+- BLOCK_MODE encoded as SET OF INTEGER per AOSP attestation_record.h
+- Version-guarded tags (RSA_OAEP_MGF_DIGEST >=100, ROLLBACK_RESISTANCE >=3, EARLY_BOOT_ONLY >=4)
+- INCLUDE_UNIQUE_ID computed via HMAC-SHA256 per KeyMint HAL spec using device HBK
+- AAID gated on attestation challenge presence
+- Certificate validity defaults aligned with AOSP (epoch notBefore, 9999-12-31 notAfter)
+
+### Binder Infrastructure
+- Native transaction code filtering at C++ level, skipping JNI for non-intercepted codes
+- getNumberOfEntries includes software-generated key count
+- deleteKey resolves KEY_ID domain via generatedKeys lookup
+- patchAuthorizations for OS/VENDOR/BOOT patch levels in authorization arrays
+
+### Software Operation AOSP Conformance
+- updateAad on non-AEAD operations returns INVALID_TAG (-76), matching AOSP operation.rs
+- All crypto exceptions wrapped as ServiceSpecificException with correct KeyMint error codes
+- GCM IV returned in CreateOperationResponse.parameters for encrypt operations
+- SoftwareOperationBinder methods @Synchronized, matching AOSP Mutex per operation
+- authorize_create enforcement: PURPOSE validation, algorithm-purpose compatibility, temporal constraints, CALLER_NONCE prohibition, WRAP_KEY rejection
+
+### Security and Configuration
+- SELinux permission checks via /proc/pid/attr/current
+- Per-UID permission verification through IPackageManager.checkPermission
+- Imported key tracking prevents stale attest-key overrides in getKeyEntry
+- nspace consistency fix in attest-key override path
+- TeeLatencySimulator with log-normal distribution matching real hardware profiles
+- Device-unique HBK seed generated on install (32 bytes from /dev/random)
+
+### Preserved from v4.8
+- StrongBox op limits (4 concurrent max, TOO_MANY_OPERATIONS rejection)
+- LRU operation pruning per security level
+- Hardware keygen rate limiting (2/30s sliding window, 2 concurrent cap)
+- Native Rust cert generation with BouncyCastle fallback
+- Key persistence across reboots
+
+---
+
 ## TEESimulator-RS v4.8.1: StrongBox Op Rejection Fix
 
 - **StrongBox op limit gate fix** — `trackAndEnforceOpLimit` was only called in the `Domain.KEY_ID` not-found path, so software-generated keys (found via `Domain.APP`) bypassed `STRONGBOX_MAX_CONCURRENT_OPS=4` entirely. DuckDetector's concurrent signing handles test created 24+ operations that all succeeded via LRU pruning instead of being rejected with `TOO_MANY_OPERATIONS (-29)`. Now enforced for all StrongBox createOperation paths.
