@@ -14,40 +14,38 @@ object AuthorizeCreate {
         rawOpParams: Array<KeyParameter>? = null,
     ): Int? {
         if (keyParams == null) return null
-        return checkPurpose(keyParams, opParams)
-            ?: checkAlgorithmPurpose(keyParams, opParams)
-            ?: checkTemporalValidity(keyParams, opParams)
-            ?: checkCallerNonce(keyParams, rawOpParams)
+        val purpose = opParams.purpose.firstOrNull() ?: return null
+        // Algorithm-level rejection runs before purpose-list check (AOSP HAL behavior)
+        return checkAlgorithmPurpose(keyParams, purpose)
+            ?: checkPurpose(keyParams, purpose)
+            ?: checkTemporalValidity(keyParams, purpose)
+            ?: checkCallerNonce(keyParams, purpose, rawOpParams)
     }
 
-    private fun checkPurpose(keyParams: KeyMintAttestation, opParams: KeyMintAttestation): Int? {
-        val requestedPurpose = opParams.purpose.firstOrNull() ?: return null
-        if (requestedPurpose == KeyPurpose.WRAP_KEY)
+    private fun checkAlgorithmPurpose(keyParams: KeyMintAttestation, purpose: Int): Int? {
+        val algo = keyParams.algorithm
+        if ((algo == Algorithm.EC || algo == Algorithm.RSA) &&
+            (purpose == KeyPurpose.VERIFY || purpose == KeyPurpose.ENCRYPT)
+        ) {
+            return KeystoreErrorCodes.unsupportedPurpose
+        }
+        if (algo == Algorithm.EC && purpose == KeyPurpose.DECRYPT)
+            return KeystoreErrorCodes.unsupportedPurpose
+        if (algo == Algorithm.RSA && purpose == KeyPurpose.AGREE_KEY)
+            return KeystoreErrorCodes.unsupportedPurpose
+        return null
+    }
+
+    private fun checkPurpose(keyParams: KeyMintAttestation, purpose: Int): Int? {
+        if (purpose == KeyPurpose.WRAP_KEY)
             return KeystoreErrorCodes.incompatiblePurpose
-        if (requestedPurpose !in keyParams.purpose)
+        if (purpose !in keyParams.purpose)
             return KeystoreErrorCodes.incompatiblePurpose
         return null
     }
 
-    private fun checkAlgorithmPurpose(keyParams: KeyMintAttestation, opParams: KeyMintAttestation): Int? {
-        val purpose = opParams.purpose.firstOrNull() ?: return null
-        return when (keyParams.algorithm) {
-            Algorithm.EC -> when (purpose) {
-                KeyPurpose.ENCRYPT, KeyPurpose.DECRYPT -> KeystoreErrorCodes.unsupportedPurpose
-                KeyPurpose.AGREE_KEY -> null
-                else -> null
-            }
-            Algorithm.RSA -> when (purpose) {
-                KeyPurpose.AGREE_KEY -> KeystoreErrorCodes.unsupportedPurpose
-                else -> null
-            }
-            else -> null
-        }
-    }
-
-    private fun checkTemporalValidity(keyParams: KeyMintAttestation, opParams: KeyMintAttestation): Int? {
+    private fun checkTemporalValidity(keyParams: KeyMintAttestation, purpose: Int): Int? {
         val now = System.currentTimeMillis()
-        val purpose = opParams.purpose.firstOrNull()
 
         keyParams.activeDateTime?.let { activeDate ->
             if (now < activeDate.time) return KeystoreErrorCodes.keyNotYetValid
@@ -68,10 +66,11 @@ object AuthorizeCreate {
         return null
     }
 
-    private fun checkCallerNonce(keyParams: KeyMintAttestation, rawOpParams: Array<KeyParameter>?): Int? {
+    private fun checkCallerNonce(keyParams: KeyMintAttestation, purpose: Int, rawOpParams: Array<KeyParameter>?): Int? {
+        if (purpose != KeyPurpose.SIGN && purpose != KeyPurpose.ENCRYPT) return null
         if (keyParams.callerNonce == true) return null
-        val hasNonce = rawOpParams?.any { it.tag == Tag.NONCE } == true
-        if (hasNonce) return KeystoreErrorCodes.callerNonceProhibited
+        if (rawOpParams?.any { it.tag == Tag.NONCE } == true)
+            return KeystoreErrorCodes.callerNonceProhibited
         return null
     }
 }

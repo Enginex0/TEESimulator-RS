@@ -70,7 +70,7 @@ class KeyMintSecurityLevelInterceptor(
             GENERATE_KEY_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-                if (!shouldSkip) return handleGenerateKey(txId, callingUid, data)
+                if (!shouldSkip) return handleGenerateKey(txId, callingUid, callingPid, data)
             }
             CREATE_OPERATION_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
@@ -247,29 +247,38 @@ class KeyMintSecurityLevelInterceptor(
         // Android framework calls createOperation with domain=APP+alias;
         // keystore2 internally resolves to KEY_ID — but software keys never
         // reach keystore2's database, so we must handle both lookup paths.
-        val generatedKeyInfo = when (keyDescriptor.domain) {
-            Domain.APP -> {
-                val alias = keyDescriptor.alias ?: run {
-                    SystemLogger.info("[TX_ID: $txId] createOperation domain=APP with null alias, forwarding to HAL")
+        val resolvedEntry: Map.Entry<KeyIdentifier, GeneratedKeyInfo> =
+            when (keyDescriptor.domain) {
+                Domain.APP -> {
+                    val alias = keyDescriptor.alias ?: run {
+                        SystemLogger.info("[TX_ID: $txId] createOperation domain=APP with null alias, forwarding to HAL")
+                        return TransactionResult.ContinueAndSkipPost
+                    }
+                    val key = KeyIdentifier(callingUid, alias)
+                    generatedKeys[key]?.let { java.util.AbstractMap.SimpleEntry(key, it) } ?: run {
+                        SystemLogger.info("[TX_ID: $txId] createOperation alias=$alias not in generatedKeys, forwarding to HAL")
+                        return TransactionResult.ContinueAndSkipPost
+                    }
+                }
+                Domain.KEY_ID -> {
+                    val nspace = keyDescriptor.nspace
+                    val entry = if (nspace == null || nspace == 0L) null
+                        else generatedKeys.entries
+                            .filter { it.key.uid == callingUid }
+                            .find { it.value.nspace == nspace }
+                    entry ?: run {
+                        trackAndEnforceOpLimit(callingUid, txId)?.let { return it }
+                        SystemLogger.info("[TX_ID: $txId] createOperation KeyId(${keyDescriptor.nspace}) NOT FOUND for uid=$callingUid. Forwarding to HAL.")
+                        return TransactionResult.Continue
+                    }
+                }
+                else -> {
+                    SystemLogger.info("[TX_ID: $txId] createOperation domain=${keyDescriptor.domain}, forwarding to HAL")
                     return TransactionResult.ContinueAndSkipPost
                 }
-                generatedKeys[KeyIdentifier(callingUid, alias)] ?: run {
-                    SystemLogger.info("[TX_ID: $txId] createOperation alias=$alias not in generatedKeys, forwarding to HAL")
-                    return TransactionResult.ContinueAndSkipPost
-                }
             }
-            Domain.KEY_ID -> {
-                findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace) ?: run {
-                    trackAndEnforceOpLimit(callingUid, txId)?.let { return it }
-                    SystemLogger.info("[TX_ID: $txId] createOperation KeyId(${keyDescriptor.nspace}) NOT FOUND for uid=$callingUid. Forwarding to HAL.")
-                    return TransactionResult.Continue
-                }
-            }
-            else -> {
-                SystemLogger.info("[TX_ID: $txId] createOperation domain=${keyDescriptor.domain}, forwarding to HAL")
-                return TransactionResult.ContinueAndSkipPost
-            }
-        }
+        val generatedKeyInfo = resolvedEntry.value
+        val resolvedKeyId = resolvedEntry.key
 
         trackAndEnforceOpLimit(callingUid, txId)?.let { return it }
 
@@ -284,14 +293,52 @@ class KeyMintSecurityLevelInterceptor(
                 else -> p.algorithm
             })
         }
+        val forced = data.readBoolean()
+
+        val requestedPurpose = parsedParams.purpose.firstOrNull()
+        if (requestedPurpose == null) {
+            return InterceptorUtils.createServiceSpecificErrorReply(KEYMINT_INVALID_ARGUMENT)
+        }
+
+        if (forced) {
+            return InterceptorUtils.createServiceSpecificErrorReply(RESPONSE_PERMISSION_DENIED)
+        }
 
         AuthorizeCreate.check(generatedKeyInfo.keyParams, parsedParams, params)?.let { errorCode ->
             SystemLogger.info("[TX_ID: $txId] authorize_create rejected: errorCode=$errorCode")
-            return InterceptorUtils.createErrorReply(errorCode)
+            return InterceptorUtils.createServiceSpecificErrorReply(errorCode)
         }
 
+        val keyParams = generatedKeyInfo.keyParams
+        val effectiveParams = if (keyParams != null) {
+            keyParams.copy(
+                purpose = parsedParams.purpose,
+                digest = parsedParams.digest.ifEmpty { keyParams.digest },
+            )
+        } else parsedParams
+
         val opLatency = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_OP_LATENCY_FLOOR_MS else 0L
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedParams, opLatency)
+        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, effectiveParams, opLatency)
+
+        if (keyParams?.usageCountLimit != null) {
+            val limit = keyParams.usageCountLimit
+            val remaining = usageCounters.getOrPut(resolvedKeyId) {
+                java.util.concurrent.atomic.AtomicInteger(limit)
+            }
+            if (remaining.get() <= 0) {
+                cleanupKeyData(resolvedKeyId)
+                usageCounters.remove(resolvedKeyId)
+                throw android.os.ServiceSpecificException(RESPONSE_KEY_NOT_FOUND)
+            }
+            softwareOperation.onFinishCallback = {
+                if (remaining.decrementAndGet() <= 0) {
+                    cleanupKeyData(resolvedKeyId)
+                    usageCounters.remove(resolvedKeyId)
+                    SystemLogger.info("Key $resolvedKeyId exhausted (USAGE_COUNT_LIMIT=$limit).")
+                }
+            }
+        }
+
         val maxOps = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_MAX_CONCURRENT_OPS else MAX_CONCURRENT_OPS_PER_UID
         pruneOpsForUid(callingUid, softwareOperation, maxOps)
         val operationBinder = SoftwareOperationBinder(softwareOperation)
@@ -315,7 +362,7 @@ class KeyMintSecurityLevelInterceptor(
         return InterceptorUtils.createTypedObjectReply(response)
     }
 
-    private fun handleGenerateKey(txId: Long, callingUid: Int, data: Parcel): TransactionResult {
+    private fun handleGenerateKey(txId: Long, callingUid: Int, callingPid: Int, data: Parcel): TransactionResult {
         if (data.dataSize() > MAX_ALIAS_LENGTH) {
             SystemLogger.warning("Skipping oversized transaction: ${data.dataSize()} bytes")
             return TransactionResult.ContinueAndSkipPost
@@ -359,6 +406,21 @@ class KeyMintSecurityLevelInterceptor(
                 if(hasDeviceIdAttestation && !AndroidPermissionUtils.hasDeviceAttestationPermission(callingUid)) {
                     SystemLogger.warning("[TX_ID: $txId] Rejecting DEVICE_ID_ATTESTATION for uid=$callingUid")
                     return InterceptorUtils.createErrorReply(KEYMINT_CANNOT_ATTEST_IDS)
+                }
+
+                // AOSP security_level.rs:478-485: INCLUDE_UNIQUE_ID requires
+                // SELinux gen_unique_id OR Android REQUEST_UNIQUE_ID_ATTESTATION
+                if (params.any { it.tag == Tag.INCLUDE_UNIQUE_ID }) {
+                    val hasSELinux = ConfigurationManager.checkSELinuxPermission(
+                        callingPid, "keystore_key", "gen_unique_id",
+                    )
+                    val hasAndroid = ConfigurationManager.hasPermissionForUid(
+                        callingUid, "android.permission.REQUEST_UNIQUE_ID_ATTESTATION",
+                    )
+                    if (!hasSELinux && !hasAndroid) {
+                        SystemLogger.warning("[TX_ID: $txId] Rejecting INCLUDE_UNIQUE_ID for uid=$callingUid pid=$callingPid")
+                        return InterceptorUtils.createServiceSpecificErrorReply(RESPONSE_PERMISSION_DENIED)
+                    }
                 }
 
                 val isSymmetric = parsedParams.algorithm == Algorithm.AES ||
@@ -668,7 +730,10 @@ class KeyMintSecurityLevelInterceptor(
         // Binder buffer is ~1MB; 256KB provides 4x safety margin for transaction overhead
         private const val MAX_ALIAS_LENGTH = 256 * 1024
         private const val KEYMINT_INVALID_INPUT_LENGTH = -21
+        private const val KEYMINT_INVALID_ARGUMENT = -38
         private const val RESPONSE_INVALID_ARGUMENT = 20
+        private const val RESPONSE_PERMISSION_DENIED = 6
+        private const val RESPONSE_KEY_NOT_FOUND = 7
         private const val TEE_LATENCY_FLOOR_MS = 15L
         private const val STRONGBOX_KEYGEN_LATENCY_FLOOR_MS = 250L
         private const val STRONGBOX_OP_LATENCY_FLOOR_MS = 80L
@@ -742,6 +807,7 @@ class KeyMintSecurityLevelInterceptor(
         val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
         val attestationKeys: MutableSet<KeyIdentifier> = ConcurrentHashMap.newKeySet()
         val importedKeys: MutableSet<KeyIdentifier> = ConcurrentHashMap.newKeySet()
+        private val usageCounters = ConcurrentHashMap<KeyIdentifier, java.util.concurrent.atomic.AtomicInteger>()
         private val interceptedOperations = ConcurrentHashMap<IBinder, OperationInterceptor>()
 
         fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? =
@@ -771,6 +837,7 @@ class KeyMintSecurityLevelInterceptor(
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
             }
             importedKeys.remove(keyId)
+            usageCounters.remove(keyId)
         }
 
         fun removeOperationInterceptor(operationBinder: IBinder, backdoor: IBinder) {
@@ -796,6 +863,7 @@ class KeyMintSecurityLevelInterceptor(
             patchedChains.clear()
             attestationKeys.clear()
             importedKeys.clear()
+            usageCounters.clear()
             GeneratedKeyPersistence.deleteAll()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }

@@ -162,6 +162,8 @@ class SoftwareOperation(
     @Volatile var finalized = false
         private set
 
+    var onFinishCallback: (() -> Unit)? = null
+
     val iv: ByteArray?
         get() = primitive.getIv()
 
@@ -231,6 +233,7 @@ class SoftwareOperation(
                 if (delayMs > 0) Thread.sleep(delayMs)
             }
             finalized = true
+            onFinishCallback?.invoke()
             SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
             return result
         } catch (e: ServiceSpecificException) {

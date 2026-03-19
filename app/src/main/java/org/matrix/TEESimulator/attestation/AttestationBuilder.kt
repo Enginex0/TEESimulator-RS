@@ -447,6 +447,11 @@ object AttestationBuilder {
             )
         }
 
+        if (params.callerNonce == true) {
+            list.add(
+                DERTaggedObject(true, AttestationConstants.TAG_CALLER_NONCE, DERNull.INSTANCE)
+            )
+        }
         params.activeDateTime?.let {
             list.add(
                 DERTaggedObject(true, AttestationConstants.TAG_ACTIVE_DATETIME, ASN1Integer(it.time))
