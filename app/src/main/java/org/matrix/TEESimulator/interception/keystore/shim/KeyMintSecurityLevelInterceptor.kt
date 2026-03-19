@@ -46,7 +46,8 @@ class KeyMintSecurityLevelInterceptor(
 ) : BinderInterceptor() {
 
     data class GeneratedKeyInfo(
-        val keyPair: KeyPair,
+        val keyPair: KeyPair?,
+        val secretKey: javax.crypto.SecretKey?,
         val nspace: Long,
         val response: KeyEntryResponse,
         val keyParams: KeyMintAttestation? = null,
@@ -136,6 +137,22 @@ class KeyMintSecurityLevelInterceptor(
             }
             attestationKeys.remove(keyId)
             importedKeys.add(keyId)
+
+            if (!ConfigurationManager.shouldSkipUid(callingUid)) {
+                val metadata: KeyMetadata =
+                    reply.readTypedObject(KeyMetadata.CREATOR)
+                        ?: return TransactionResult.SkipTransaction
+                val originalChain = CertificateHelper.getCertificateChain(metadata)
+                if (originalChain != null && originalChain.size > 1) {
+                    val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+                    CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
+                    metadata.authorizations =
+                        InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
+                    patchedChains[keyId] = newChain
+                    SystemLogger.debug("Cached patched certificate chain for imported key $keyId.")
+                    return InterceptorUtils.createTypedObjectReply(metadata)
+                }
+            }
         } else if (code == CREATE_OPERATION_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
@@ -189,6 +206,8 @@ class KeyMintSecurityLevelInterceptor(
                 val key = metadata.key!!
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
+                metadata.authorizations =
+                    InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
 
                 // We must clean up cached generated keys before storing the patched chain
                 cleanupKeyData(keyId)
@@ -237,7 +256,7 @@ class KeyMintSecurityLevelInterceptor(
         txId: Long,
         callingUid: Int,
         data: Parcel,
-    ): TransactionResult {
+    ): TransactionResult = runCatching {
         SystemLogger.debug("[TX_ID: $txId] createOperation parcel: dataSize=${data.dataSize()} dataAvail=${data.dataAvail()} dataPos=${data.dataPosition()}")
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
@@ -287,11 +306,14 @@ class KeyMintSecurityLevelInterceptor(
         val params = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedParams = KeyMintAttestation(params).let { p ->
             if (p.algorithm != 0) p
-            else p.copy(algorithm = when (generatedKeyInfo.keyPair.private.algorithm) {
-                "EC", "ECDSA" -> Algorithm.EC
-                "RSA" -> Algorithm.RSA
-                else -> p.algorithm
-            })
+            else {
+                val keyAlgo = generatedKeyInfo.keyPair?.private?.algorithm
+                p.copy(algorithm = when (keyAlgo) {
+                    "EC", "ECDSA" -> Algorithm.EC
+                    "RSA" -> Algorithm.RSA
+                    else -> generatedKeyInfo.keyParams?.algorithm ?: p.algorithm
+                })
+            }
         }
         val forced = data.readBoolean()
 
@@ -318,7 +340,7 @@ class KeyMintSecurityLevelInterceptor(
         } else parsedParams
 
         val opLatency = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_OP_LATENCY_FLOOR_MS else 0L
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, effectiveParams, opLatency)
+        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, generatedKeyInfo.secretKey, effectiveParams, opLatency)
 
         if (keyParams?.usageCountLimit != null) {
             val limit = keyParams.usageCountLimit
@@ -328,7 +350,7 @@ class KeyMintSecurityLevelInterceptor(
             if (remaining.get() <= 0) {
                 cleanupKeyData(resolvedKeyId)
                 usageCounters.remove(resolvedKeyId)
-                throw android.os.ServiceSpecificException(RESPONSE_KEY_NOT_FOUND)
+                return InterceptorUtils.createServiceSpecificErrorReply(RESPONSE_KEY_NOT_FOUND)
             }
             softwareOperation.onFinishCallback = {
                 if (remaining.decrementAndGet() <= 0) {
@@ -347,19 +369,13 @@ class KeyMintSecurityLevelInterceptor(
             CreateOperationResponse().apply {
                 iOperation = operationBinder
                 operationChallenge = null
-                softwareOperation.iv?.let { iv ->
-                    parameters = KeyParameters().apply {
-                        keyParameter = arrayOf(
-                            KeyParameter().apply {
-                                tag = Tag.NONCE
-                                value = KeyParameterValue.blob(iv)
-                            }
-                        )
-                    }
-                }
+                parameters = softwareOperation.beginParameters
             }
 
-        return InterceptorUtils.createTypedObjectReply(response)
+        InterceptorUtils.createTypedObjectReply(response)
+    }.getOrElse {
+        SystemLogger.error("Error during createOperation for UID $callingUid.", it)
+        InterceptorUtils.createServiceSpecificErrorReply(KEYMINT_UNKNOWN_ERROR)
     }
 
     private fun handleGenerateKey(txId: Long, callingUid: Int, callingPid: Int, data: Parcel): TransactionResult {
@@ -427,11 +443,6 @@ class KeyMintSecurityLevelInterceptor(
                     parsedParams.algorithm == Algorithm.HMAC ||
                     parsedParams.algorithm == Algorithm.TRIPLE_DES
 
-                if (isSymmetric) {
-                    SystemLogger.debug("[TX_ID: $txId] Symmetric algorithm ${parsedParams.algorithm} → forwarding to HAL")
-                    return TransactionResult.ContinueAndSkipPost
-                }
-
                 if (securityLevel == SecurityLevel.STRONGBOX && !isStrongBoxCapable(parsedParams)) {
                     SystemLogger.info("[TX_ID: $txId] StrongBox-unsupported params (algo=${parsedParams.algorithm} size=${parsedParams.keySize}) → forwarding to HAL for rejection")
                     return TransactionResult.ContinueAndSkipPost
@@ -475,7 +486,7 @@ class KeyMintSecurityLevelInterceptor(
             }
             .getOrElse {
                 SystemLogger.error("Error during generateKey handling for UID $callingUid.", it)
-                TransactionResult.ContinueAndSkipPost
+                InterceptorUtils.createServiceSpecificErrorReply(SECURE_HW_COMMUNICATION_FAILED)
             }
     }
 
@@ -487,9 +498,54 @@ class KeyMintSecurityLevelInterceptor(
         keyId: KeyIdentifier,
         isAttestKeyRequest: Boolean,
     ): TransactionResult {
-        val startNs = System.nanoTime()
+        val genStartNanos = System.nanoTime()
         keyDescriptor.nspace = secureRandom.nextLong()
         SystemLogger.info("Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}].")
+
+        cleanupKeyData(keyId)
+
+        val isSymmetric = parsedParams.algorithm != Algorithm.EC &&
+            parsedParams.algorithm != Algorithm.RSA
+
+        if (isSymmetric) {
+            val algoName = when (parsedParams.algorithm) {
+                Algorithm.AES -> "AES"
+                Algorithm.HMAC -> "HmacSHA256"
+                else -> throw android.os.ServiceSpecificException(
+                    SECURE_HW_COMMUNICATION_FAILED,
+                    "Unsupported symmetric algorithm: ${parsedParams.algorithm}",
+                )
+            }
+            val keyGen = javax.crypto.KeyGenerator.getInstance(algoName)
+            keyGen.init(parsedParams.keySize)
+            val secretKey = keyGen.generateKey()
+
+            val metadata = KeyMetadata().apply {
+                keySecurityLevel = securityLevel
+                key = KeyDescriptor().apply {
+                    domain = Domain.KEY_ID
+                    nspace = keyDescriptor.nspace
+                    alias = null
+                    blob = null
+                }
+                certificate = null
+                certificateChain = null
+                authorizations = parsedParams.toAuthorizations(callingUid, securityLevel)
+                modificationTimeMs = System.currentTimeMillis()
+            }
+            val response = KeyEntryResponse().apply {
+                this.metadata = metadata
+                iSecurityLevel = original
+            }
+            generatedKeys[keyId] = GeneratedKeyInfo(null, secretKey, keyDescriptor.nspace, response, parsedParams)
+
+            val elapsedMs = (System.nanoTime() - genStartNanos) / 1_000_000
+            val floor = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_KEYGEN_LATENCY_FLOOR_MS else TEE_LATENCY_FLOOR_MS
+            val delayMs = floor - elapsedMs
+            if (delayMs > 0) Thread.sleep(delayMs)
+
+            return InterceptorUtils.createTypedObjectReply(metadata)
+        }
 
         val keyData = if (NativeCertGen.isAvailable && attestationKey == null) {
             generateAttestedKeyPairNative(callingUid, parsedParams)
@@ -502,9 +558,8 @@ class KeyMintSecurityLevelInterceptor(
             )
         } ?: throw Exception("Both native and BouncyCastle cert gen failed.")
 
-        cleanupKeyData(keyId)
         val response = buildKeyEntryResponse(callingUid, keyData.second, parsedParams, keyDescriptor)
-        generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response, parsedParams)
+        generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, null, keyDescriptor.nspace, response, parsedParams)
         if (isAttestKeyRequest) attestationKeys.add(keyId)
 
         GeneratedKeyPersistence.save(
@@ -521,7 +576,7 @@ class KeyMintSecurityLevelInterceptor(
             isAttestationKey = isAttestKeyRequest,
         )
 
-        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+        val elapsedMs = (System.nanoTime() - genStartNanos) / 1_000_000
         val floor = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_KEYGEN_LATENCY_FLOOR_MS else TEE_LATENCY_FLOOR_MS
         val delayMs = floor - elapsedMs
         if (delayMs > 0) Thread.sleep(delayMs)
@@ -711,7 +766,7 @@ class KeyMintSecurityLevelInterceptor(
                 )
 
                 val response = buildKeyEntryResponse(record.uid, certChain, attestation, descriptor)
-                generatedKeys[keyId] = GeneratedKeyInfo(keyPair, record.nspace, response, attestation)
+                generatedKeys[keyId] = GeneratedKeyInfo(keyPair, null, record.nspace, response, attestation)
                 if (record.isAttestationKey) attestationKeys.add(keyId)
 
                 SystemLogger.debug("Restored persisted key: $keyId")
@@ -739,6 +794,8 @@ class KeyMintSecurityLevelInterceptor(
         private const val STRONGBOX_OP_LATENCY_FLOOR_MS = 80L
         private const val KEYMINT_TOO_MANY_OPERATIONS = -29
         private const val KEYMINT_CANNOT_ATTEST_IDS = -66
+        private const val KEYMINT_UNKNOWN_ERROR = -1000
+        private const val SECURE_HW_COMMUNICATION_FAILED = -49
         private const val MAX_CONCURRENT_OPS_PER_UID = 15
         private const val STRONGBOX_MAX_CONCURRENT_OPS = 4
         private const val STRONGBOX_OP_WINDOW_NS = 10_000_000_000L // 10s
@@ -900,6 +957,34 @@ private fun KeyMintAttestation.toAuthorizations(
     if (this.rsaPublicExponent != null) {
         authList.add(createAuth(Tag.RSA_PUBLIC_EXPONENT, KeyParameterValue.longInteger(this.rsaPublicExponent.toLong())))
     }
+    if (this.callerNonce == true) {
+        authList.add(createAuth(Tag.CALLER_NONCE, KeyParameterValue.boolValue(true)))
+    }
+    if (this.minMacLength != null) {
+        authList.add(createAuth(Tag.MIN_MAC_LENGTH, KeyParameterValue.integer(this.minMacLength)))
+    }
+    if (this.rollbackResistance == true) {
+        authList.add(createAuth(Tag.ROLLBACK_RESISTANCE, KeyParameterValue.boolValue(true)))
+    }
+    if (this.earlyBootOnly == true) {
+        authList.add(createAuth(Tag.EARLY_BOOT_ONLY, KeyParameterValue.boolValue(true)))
+    }
+    if (this.allowWhileOnBody == true) {
+        authList.add(createAuth(Tag.ALLOW_WHILE_ON_BODY, KeyParameterValue.boolValue(true)))
+    }
+    if (this.trustedUserPresenceRequired == true) {
+        authList.add(createAuth(Tag.TRUSTED_USER_PRESENCE_REQUIRED, KeyParameterValue.boolValue(true)))
+    }
+    if (this.trustedConfirmationRequired == true) {
+        authList.add(createAuth(Tag.TRUSTED_CONFIRMATION_REQUIRED, KeyParameterValue.boolValue(true)))
+    }
+    if (this.maxUsesPerBoot != null) {
+        authList.add(createAuth(Tag.MAX_USES_PER_BOOT, KeyParameterValue.integer(this.maxUsesPerBoot)))
+    }
+    if (this.maxBootLevel != null) {
+        authList.add(createAuth(Tag.MAX_BOOT_LEVEL, KeyParameterValue.integer(this.maxBootLevel)))
+    }
+
     authList.add(createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true)))
     authList.add(createAuth(Tag.ORIGIN, KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED)))
     authList.add(createAuth(Tag.OS_VERSION, KeyParameterValue.integer(AndroidDeviceUtils.osVersion)))
@@ -916,17 +1001,37 @@ private fun KeyMintAttestation.toAuthorizations(
     if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
         authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
     }
-    authList.add(createAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis())))
-    authList.add(
-        Authorization().apply {
-            this.keyParameter =
-                KeyParameter().apply {
-                    this.tag = Tag.USER_ID
-                    this.value = KeyParameterValue.integer(callingUid / 100000)
-                }
+
+    fun createSwAuth(tag: Int, value: KeyParameterValue): Authorization {
+        val param = KeyParameter().apply {
+            this.tag = tag
+            this.value = value
+        }
+        return Authorization().apply {
+            this.keyParameter = param
             this.securityLevel = SecurityLevel.SOFTWARE
         }
-    )
+    }
+
+    authList.add(createSwAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis())))
+
+    this.activeDateTime?.let {
+        authList.add(createSwAuth(Tag.ACTIVE_DATETIME, KeyParameterValue.dateTime(it.time)))
+    }
+    this.originationExpireDateTime?.let {
+        authList.add(createSwAuth(Tag.ORIGINATION_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time)))
+    }
+    this.usageExpireDateTime?.let {
+        authList.add(createSwAuth(Tag.USAGE_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time)))
+    }
+    this.usageCountLimit?.let {
+        authList.add(createSwAuth(Tag.USAGE_COUNT_LIMIT, KeyParameterValue.integer(it)))
+    }
+    if (this.unlockedDeviceRequired == true) {
+        authList.add(createSwAuth(Tag.UNLOCKED_DEVICE_REQUIRED, KeyParameterValue.boolValue(true)))
+    }
+
+    authList.add(createSwAuth(Tag.USER_ID, KeyParameterValue.integer(callingUid / 100000)))
 
     return authList.toTypedArray()
 }

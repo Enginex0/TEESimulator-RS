@@ -3,10 +3,14 @@ package org.matrix.TEESimulator.interception.keystore.shim
 import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.BlockMode
 import android.hardware.security.keymint.Digest
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
 import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
+import android.hardware.security.keymint.Tag
 import android.os.ServiceSpecificException
 import android.system.keystore2.IKeystoreOperation
+import android.system.keystore2.KeyParameters
 import java.security.KeyPair
 import java.security.Signature
 import java.security.SignatureException
@@ -22,7 +26,7 @@ private sealed interface CryptoPrimitive {
     fun update(data: ByteArray?): ByteArray?
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray?
     fun abort()
-    fun getIv(): ByteArray? = null
+    fun getBeginParameters(): Array<KeyParameter>? = null
 }
 
 private object JcaAlgorithmMapper {
@@ -125,15 +129,14 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
 }
 
 private class CipherPrimitive(
-    keyPair: KeyPair,
+    cryptoKey: java.security.Key,
     params: KeyMintAttestation,
     private val opMode: Int,
 ) : CryptoPrimitive {
     private val isAead = params.blockMode.firstOrNull() == BlockMode.GCM
     private val cipher: Cipher =
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
-            val key = if (opMode == Cipher.ENCRYPT_MODE) keyPair.public else keyPair.private
-            init(opMode, key)
+            init(opMode, cryptoKey)
         }
 
     override fun updateAad(aadInput: ByteArray?) {
@@ -147,14 +150,45 @@ private class CipherPrimitive(
     override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? =
         if (data != null) cipher.doFinal(data) else cipher.doFinal()
 
-    override fun getIv(): ByteArray? = if (isAead) cipher.iv else null
+    override fun getBeginParameters(): Array<KeyParameter>? {
+        val iv = cipher.iv ?: return null
+        return arrayOf(
+            KeyParameter().apply {
+                tag = Tag.NONCE
+                value = KeyParameterValue.blob(iv)
+            }
+        )
+    }
+
+    override fun abort() {}
+}
+
+private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
+    private val agreement: javax.crypto.KeyAgreement =
+        javax.crypto.KeyAgreement.getInstance("ECDH").apply { init(keyPair.private) }
+
+    override fun update(data: ByteArray?): ByteArray? = null
+
+    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
+        if (data == null)
+            throw ServiceSpecificException(
+                KeystoreErrorCodes.invalidArgument,
+                "Peer public key required for key agreement",
+            )
+        val peerKey =
+            java.security.KeyFactory.getInstance("EC")
+                .generatePublic(java.security.spec.X509EncodedKeySpec(data))
+        agreement.doPhase(peerKey, true)
+        return agreement.generateSecret()
+    }
 
     override fun abort() {}
 }
 
 class SoftwareOperation(
     private val txId: Long,
-    keyPair: KeyPair,
+    keyPair: KeyPair?,
+    secretKey: javax.crypto.SecretKey?,
     params: KeyMintAttestation,
     private val latencyFloorMs: Long = 0L,
 ) {
@@ -164,8 +198,12 @@ class SoftwareOperation(
 
     var onFinishCallback: (() -> Unit)? = null
 
-    val iv: ByteArray?
-        get() = primitive.getIv()
+    val beginParameters: KeyParameters?
+        get() {
+            val params = primitive.getBeginParameters() ?: return null
+            if (params.isEmpty()) return null
+            return KeyParameters().apply { keyParameter = params }
+        }
 
     init {
         val purpose = params.purpose.firstOrNull()
@@ -174,10 +212,17 @@ class SoftwareOperation(
 
         primitive =
             when (purpose) {
-                KeyPurpose.SIGN -> Signer(keyPair, params)
-                KeyPurpose.VERIFY -> Verifier(keyPair, params)
-                KeyPurpose.ENCRYPT -> CipherPrimitive(keyPair, params, Cipher.ENCRYPT_MODE)
-                KeyPurpose.DECRYPT -> CipherPrimitive(keyPair, params, Cipher.DECRYPT_MODE)
+                KeyPurpose.SIGN -> Signer(keyPair!!, params)
+                KeyPurpose.VERIFY -> Verifier(keyPair!!, params)
+                KeyPurpose.ENCRYPT -> {
+                    val key: java.security.Key = secretKey ?: keyPair!!.public
+                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE)
+                }
+                KeyPurpose.DECRYPT -> {
+                    val key: java.security.Key = secretKey ?: keyPair!!.private
+                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE)
+                }
+                KeyPurpose.AGREE_KEY -> KeyAgreementPrimitive(keyPair!!)
                 else ->
                     throw ServiceSpecificException(
                         KeystoreErrorCodes.unsupportedPurpose,

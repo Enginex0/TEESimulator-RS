@@ -303,9 +303,10 @@ object GeneratedKeyPersistence {
             return
         }
 
+        val keyPair = generatedKeyInfo.keyPair ?: return
         save(
             keyId = keyId,
-            keyPair = generatedKeyInfo.keyPair,
+            keyPair = keyPair,
             nspace = generatedKeyInfo.nspace,
             securityLevel = secLevel,
             certChain = newChain.toList(),
