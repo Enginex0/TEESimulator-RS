@@ -9,6 +9,7 @@ import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
 import android.hardware.security.keymint.Tag
 import android.os.ServiceSpecificException
+import java.util.concurrent.locks.LockSupport
 import android.system.keystore2.IKeystoreOperation
 import android.system.keystore2.KeyParameters
 import java.security.KeyPair
@@ -275,7 +276,7 @@ class SoftwareOperation(
             if (latencyFloorMs > 0) {
                 val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
                 val delayMs = latencyFloorMs - elapsedMs
-                if (delayMs > 0) Thread.sleep(delayMs)
+                if (delayMs > 0) LockSupport.parkNanos(delayMs * 1_000_000)
             }
             finalized = true
             onFinishCallback?.invoke()

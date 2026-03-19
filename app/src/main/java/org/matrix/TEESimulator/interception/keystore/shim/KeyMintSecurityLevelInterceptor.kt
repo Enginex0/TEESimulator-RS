@@ -22,7 +22,9 @@ import java.security.cert.CertificateFactory
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.LockSupport
 import org.matrix.TEESimulator.attestation.AttestationBuilder
 import org.matrix.TEESimulator.attestation.AttestationConstants
 import org.matrix.TEESimulator.attestation.AttestationPatcher
@@ -39,6 +41,7 @@ import org.matrix.TEESimulator.pki.KeyBoxManager
 import org.matrix.TEESimulator.pki.NativeCertGen
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 import org.matrix.TEESimulator.util.AndroidPermissionUtils
+import org.matrix.TEESimulator.util.TeeLatencySimulator
 
 class KeyMintSecurityLevelInterceptor(
     private val original: IKeystoreSecurityLevel,
@@ -82,7 +85,8 @@ class KeyMintSecurityLevelInterceptor(
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return TransactionResult.ContinueAndSkipPost
                 SystemLogger.info(
                     "[TX_ID: $txId] Forward to post-importKey hook for ${keyDescriptor.alias}[${keyDescriptor.nspace}]"
                 )
@@ -161,8 +165,10 @@ class KeyMintSecurityLevelInterceptor(
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-            val params = data.createTypedArray(KeyParameter.CREATOR)!!
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                ?: return TransactionResult.SkipTransaction
+            val params = data.createTypedArray(KeyParameter.CREATOR)
+                ?: return TransactionResult.SkipTransaction
             val parsedParams = KeyMintAttestation(params)
             val forced = data.readBoolean()
             if (forced)
@@ -170,7 +176,8 @@ class KeyMintSecurityLevelInterceptor(
                     "[TX_ID: $txId] Current operation has a very high pruning power."
                 )
             val response: CreateOperationResponse =
-                reply.readTypedObject(CreateOperationResponse.CREATOR)!!
+                reply.readTypedObject(CreateOperationResponse.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
             SystemLogger.verbose(
                 "[TX_ID: $txId] CreateOperationResponse: ${response.iOperation} ${response.operationChallenge}"
             )
@@ -206,8 +213,10 @@ class KeyMintSecurityLevelInterceptor(
 
                 // Cache the newly patched chain to ensure consistency across subsequent API calls.
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                val key = metadata.key!!
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
+                val key = metadata.key
+                    ?: return TransactionResult.SkipTransaction
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
                 metadata.authorizations =
@@ -547,10 +556,12 @@ class KeyMintSecurityLevelInterceptor(
             }
             generatedKeys[keyId] = GeneratedKeyInfo(null, secretKey, keyDescriptor.nspace, response, parsedParams)
 
-            val elapsedMs = (System.nanoTime() - genStartNanos) / 1_000_000
-            val floor = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_KEYGEN_LATENCY_FLOOR_MS else TEE_LATENCY_FLOOR_MS
-            val delayMs = floor - elapsedMs
-            if (delayMs > 0) Thread.sleep(delayMs)
+            if (securityLevel == SecurityLevel.STRONGBOX) {
+                val delayMs = STRONGBOX_KEYGEN_LATENCY_FLOOR_MS - (System.nanoTime() - genStartNanos) / 1_000_000
+                if (delayMs > 0) LockSupport.parkNanos(delayMs * 1_000_000)
+            } else {
+                TeeLatencySimulator.simulateGenerateKeyDelay(parsedParams.algorithm, System.nanoTime() - genStartNanos)
+            }
 
             return InterceptorUtils.createTypedObjectReply(metadata)
         }
@@ -570,24 +581,29 @@ class KeyMintSecurityLevelInterceptor(
         generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, null, keyDescriptor.nspace, response, parsedParams)
         if (isAttestKeyRequest) attestationKeys.add(keyId)
 
-        GeneratedKeyPersistence.save(
-            keyId = keyId,
-            keyPair = keyData.first,
-            nspace = keyDescriptor.nspace,
-            securityLevel = securityLevel,
-            certChain = keyData.second.toList(),
-            algorithm = parsedParams.algorithm,
-            keySize = parsedParams.keySize,
-            ecCurve = parsedParams.ecCurve ?: 0,
-            purposes = parsedParams.purpose,
-            digests = parsedParams.digest,
-            isAttestationKey = isAttestKeyRequest,
-        )
+        val certChainCopy = keyData.second.toList()
+        persistExecutor.execute {
+            GeneratedKeyPersistence.save(
+                keyId = keyId,
+                keyPair = keyData.first,
+                nspace = keyDescriptor.nspace,
+                securityLevel = securityLevel,
+                certChain = certChainCopy,
+                algorithm = parsedParams.algorithm,
+                keySize = parsedParams.keySize,
+                ecCurve = parsedParams.ecCurve ?: 0,
+                purposes = parsedParams.purpose,
+                digests = parsedParams.digest,
+                isAttestationKey = isAttestKeyRequest,
+            )
+        }
 
-        val elapsedMs = (System.nanoTime() - genStartNanos) / 1_000_000
-        val floor = if (securityLevel == SecurityLevel.STRONGBOX) STRONGBOX_KEYGEN_LATENCY_FLOOR_MS else TEE_LATENCY_FLOOR_MS
-        val delayMs = floor - elapsedMs
-        if (delayMs > 0) Thread.sleep(delayMs)
+        if (securityLevel == SecurityLevel.STRONGBOX) {
+            val delayMs = STRONGBOX_KEYGEN_LATENCY_FLOOR_MS - (System.nanoTime() - genStartNanos) / 1_000_000
+            if (delayMs > 0) LockSupport.parkNanos(delayMs * 1_000_000)
+        } else {
+            TeeLatencySimulator.simulateGenerateKeyDelay(parsedParams.algorithm, System.nanoTime() - genStartNanos)
+        }
 
         return InterceptorUtils.createTypedObjectReply(response.metadata)
     }
@@ -874,6 +890,8 @@ class KeyMintSecurityLevelInterceptor(
                 }
                 .associate { field -> (field.get(null) as Int) to field.name.split("_")[1] }
         }
+
+        private val persistExecutor = Executors.newSingleThreadExecutor()
 
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()
         val teeResponses = ConcurrentHashMap<KeyIdentifier, KeyEntryResponse>()
