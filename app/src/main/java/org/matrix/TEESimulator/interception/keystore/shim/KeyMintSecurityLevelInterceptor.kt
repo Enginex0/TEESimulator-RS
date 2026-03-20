@@ -14,7 +14,14 @@ import java.security.KeyPair
 import java.security.SecureRandom
 import java.security.cert.Certificate
 import java.util.concurrent.CompletableFuture
+import android.util.Pair as AndroidPair
+import java.io.ByteArrayInputStream
+import java.security.KeyFactory
+import java.security.cert.CertificateFactory
+import java.security.spec.PKCS8EncodedKeySpec
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import org.matrix.TEESimulator.attestation.AttestationBuilder
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -22,8 +29,11 @@ import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.pki.CertGenConfig
 import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.pki.CertificateHelper
+import org.matrix.TEESimulator.pki.KeyBoxManager
+import org.matrix.TEESimulator.pki.NativeCertGen
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 import org.matrix.TEESimulator.util.TeeLatencySimulator
 
@@ -547,14 +557,18 @@ class KeyMintSecurityLevelInterceptor(
             return InterceptorUtils.createTypedObjectReply(metadata)
         }
 
-        val keyData =
+        val keyData = if (NativeCertGen.isAvailable && attestationKey == null) {
+            generateAttestedKeyPairNative(callingUid, parsedParams)
+                ?: CertificateGenerator.generateAttestedKeyPair(
+                    callingUid, keyDescriptor.alias, attestationKey?.alias,
+                    parsedParams, securityLevel,
+                )
+        } else {
             CertificateGenerator.generateAttestedKeyPair(
-                callingUid,
-                keyDescriptor.alias,
-                attestationKey?.alias,
-                parsedParams,
-                securityLevel,
-            ) ?: throw Exception("CertificateGenerator failed to create key pair.")
+                callingUid, keyDescriptor.alias, attestationKey?.alias,
+                parsedParams, securityLevel,
+            )
+        } ?: throw Exception("Certificate generation failed.")
 
         val response =
             buildKeyEntryResponse(callingUid, keyData.second, parsedParams, keyDescriptor)
@@ -562,10 +576,180 @@ class KeyMintSecurityLevelInterceptor(
             GeneratedKeyInfo(keyData.first, null, keyDescriptor.nspace, response, parsedParams)
         if (isAttestKeyRequest) attestationKeys.add(keyId)
 
+        val certChainCopy = keyData.second.toList()
+        persistExecutor.execute {
+            GeneratedKeyPersistence.save(
+                keyId = keyId,
+                keyPair = keyData.first,
+                nspace = keyDescriptor.nspace,
+                securityLevel = securityLevel,
+                certChain = certChainCopy,
+                algorithm = parsedParams.algorithm,
+                keySize = parsedParams.keySize,
+                ecCurve = parsedParams.ecCurve ?: 0,
+                purposes = parsedParams.purpose,
+                digests = parsedParams.digest,
+                isAttestationKey = isAttestKeyRequest,
+            )
+        }
+
         TeeLatencySimulator.simulateGenerateKeyDelay(
             parsedParams.algorithm, System.nanoTime() - genStartNanos
         )
         return InterceptorUtils.createTypedObjectReply(response.metadata)
+    }
+
+    private fun generateAttestedKeyPairNative(
+        callingUid: Int,
+        params: KeyMintAttestation,
+    ): AndroidPair<KeyPair, List<Certificate>>? {
+        return runCatching {
+            val algorithmName = when (params.algorithm) {
+                Algorithm.EC -> "EC"
+                Algorithm.RSA -> "RSA"
+                else -> return null
+            }
+            val keyboxFile = ConfigurationManager.getKeyboxFileForUid(callingUid)
+            val keybox = KeyBoxManager.getAttestationKey(keyboxFile, algorithmName) ?: return null
+
+            val keyboxCertChainBytes = keybox.certificates
+                .map { it.encoded }
+                .fold(ByteArray(0)) { acc, der -> acc + der }
+
+            val attestVersion = AndroidDeviceUtils.getAttestVersion(securityLevel)
+            val config = CertGenConfig(
+                algorithm = params.algorithm,
+                keySize = params.keySize,
+                ecCurve = params.ecCurve ?: 0,
+                rsaPublicExponent = params.rsaPublicExponent?.toLong() ?: 65537L,
+                attestationChallenge = params.attestationChallenge,
+                purposes = params.purpose.toIntArray(),
+                digests = params.digest.toIntArray(),
+                certSerial = params.certificateSerial?.toByteArray(),
+                certSubject = params.certificateSubject?.encoded,
+                certNotBefore = params.certificateNotBefore?.time ?: -1L,
+                certNotAfter = params.certificateNotAfter?.time ?: -1L,
+                keyboxPrivateKey = keybox.keyPair.private.encoded,
+                keyboxCertChain = keyboxCertChainBytes,
+                securityLevel = securityLevel,
+                attestVersion = attestVersion,
+                keymasterVersion = AndroidDeviceUtils.getKeymasterVersion(securityLevel),
+                osVersion = AndroidDeviceUtils.osVersion,
+                osPatchLevel = AndroidDeviceUtils.getPatchLevel(callingUid),
+                vendorPatchLevel = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid),
+                bootPatchLevel = AndroidDeviceUtils.getBootPatchLevelLong(callingUid),
+                bootKey = AndroidDeviceUtils.bootKey,
+                bootHash = AndroidDeviceUtils.bootHash,
+                creationDatetime = System.currentTimeMillis(),
+                attestationApplicationId = AttestationBuilder.createApplicationId(callingUid).octets,
+                moduleHash = if (attestVersion >= 400) AndroidDeviceUtils.moduleHash else null,
+                idBrand = params.brand,
+                idDevice = params.device,
+                idProduct = params.product,
+                idSerial = params.serial,
+                idImei = params.imei,
+                idMeid = params.meid,
+                idManufacturer = params.manufacturer,
+                idModel = params.model,
+                idSecondImei = if (attestVersion >= 300) params.secondImei else null,
+                activeDatetime = params.activeDateTime?.time ?: -1L,
+                originationExpireDatetime = params.originationExpireDateTime?.time ?: -1L,
+                usageExpireDatetime = params.usageExpireDateTime?.time ?: -1L,
+                usageCountLimit = params.usageCountLimit ?: -1,
+                callerNonce = params.callerNonce == true,
+                unlockedDeviceRequired = params.unlockedDeviceRequired == true,
+                noAuthRequired = params.noAuthRequired != false,
+            )
+
+            val resultBytes = NativeCertGen.generateAttestedKeyPair(config) ?: return null
+            val (keyPair, certs) = NativeCertGen.parseNativeResult(resultBytes)
+            SystemLogger.info("NativeCertGen: ${certs.size} certs generated")
+            AndroidPair(keyPair, certs)
+        }.onFailure {
+            SystemLogger.error("NativeCertGen failed, falling back to BouncyCastle", it)
+        }.getOrNull()
+    }
+
+    fun loadPersistedKeys() {
+        val records = GeneratedKeyPersistence.loadAll(securityLevel)
+        if (records.isEmpty()) return
+
+        SystemLogger.info("Restoring ${records.size} persisted keys for security level $securityLevel")
+        for (record in records) {
+            runCatching {
+                val keyId = KeyIdentifier(record.uid, record.alias)
+                if (generatedKeys.containsKey(keyId)) return@runCatching
+
+                val algorithmName = when (record.algorithm) {
+                    Algorithm.EC -> "EC"
+                    Algorithm.RSA -> "RSA"
+                    else -> throw IllegalArgumentException("Unknown algorithm: ${record.algorithm}")
+                }
+
+                val keyFactory = KeyFactory.getInstance(algorithmName)
+                val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(record.privateKeyBytes))
+
+                val certFactory = CertificateFactory.getInstance("X.509")
+                val certChain = record.certChainBytes.map { bytes ->
+                    certFactory.generateCertificate(ByteArrayInputStream(bytes))
+                }
+                require(certChain.isNotEmpty()) { "Empty certificate chain" }
+
+                val keyPair = KeyPair(certChain[0].publicKey, privateKey)
+                val descriptor = KeyDescriptor().apply {
+                    domain = Domain.APP
+                    nspace = record.nspace
+                    alias = record.alias
+                    blob = null
+                }
+
+                val attestation = KeyMintAttestation(
+                    algorithm = record.algorithm,
+                    ecCurve = if (record.algorithm == Algorithm.EC) record.ecCurve else null,
+                    ecCurveName = "",
+                    keySize = record.keySize,
+                    origin = null,
+                    noAuthRequired = null,
+                    blockMode = emptyList(),
+                    padding = emptyList(),
+                    purpose = record.purposes,
+                    digest = record.digests,
+                    rsaPublicExponent = null,
+                    certificateSerial = null,
+                    certificateSubject = null,
+                    certificateNotBefore = null,
+                    certificateNotAfter = null,
+                    attestationChallenge = null,
+                    brand = null, device = null, product = null, serial = null,
+                    imei = null, meid = null, manufacturer = null, model = null,
+                    secondImei = null,
+                    activeDateTime = null,
+                    originationExpireDateTime = null,
+                    usageExpireDateTime = null,
+                    usageCountLimit = null,
+                    callerNonce = null,
+                    unlockedDeviceRequired = null,
+                    includeUniqueId = null,
+                    rollbackResistance = null,
+                    earlyBootOnly = null,
+                    allowWhileOnBody = null,
+                    trustedUserPresenceRequired = null,
+                    trustedConfirmationRequired = null,
+                    maxUsesPerBoot = null,
+                    maxBootLevel = null,
+                    minMacLength = null,
+                    rsaOaepMgfDigest = emptyList(),
+                )
+
+                val response = buildKeyEntryResponse(record.uid, certChain, attestation, descriptor)
+                generatedKeys[keyId] = GeneratedKeyInfo(keyPair, null, record.nspace, response, attestation)
+                if (record.isAttestationKey) attestationKeys.add(keyId)
+                SystemLogger.debug("Restored persisted key: $keyId")
+            }.onFailure {
+                SystemLogger.error("Failed to restore key: uid=${record.uid} alias=${record.alias}", it)
+            }
+        }
+        SystemLogger.info("Key restoration complete. Total in memory: ${generatedKeys.size}")
     }
 
     /**
@@ -690,8 +874,8 @@ class KeyMintSecurityLevelInterceptor(
 
     companion object {
         private val secureRandom = SecureRandom()
+        private val persistExecutor = Executors.newSingleThreadExecutor()
 
-        /** Once set to true, AUTO mode skips the race and uses PATCH directly. */
         @Volatile var teeFunctional = false
 
         private const val INVALID_ARGUMENT = 20
@@ -770,6 +954,7 @@ class KeyMintSecurityLevelInterceptor(
         fun cleanupKeyData(keyId: KeyIdentifier) {
             if (generatedKeys.remove(keyId) != null) {
                 SystemLogger.debug("Remove generated key ${keyId}")
+                GeneratedKeyPersistence.delete(keyId)
             }
             if (patchedChains.remove(keyId) != null) {
                 SystemLogger.debug("Remove patched chain for ${keyId}")
@@ -801,6 +986,7 @@ class KeyMintSecurityLevelInterceptor(
             importedKeys.clear()
             usageCounters.clear()
             teeResponses.clear()
+            GeneratedKeyPersistence.deleteAll()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
     }

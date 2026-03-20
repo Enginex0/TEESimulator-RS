@@ -553,7 +553,7 @@ object AttestationBuilder {
      *   retrieved.
      */
     @Throws(Throwable::class)
-    private fun createApplicationId(uid: Int): DEROctetString {
+    internal fun createApplicationId(uid: Int): DEROctetString {
         // AOSP keystore_attestation_id.cpp: gather_attestation_application_id()
         // uses a hardcoded identity for AID_SYSTEM (1000) and AID_ROOT (0):
         //   packageName = "AndroidSystem", versionCode = 1, no signing digests.

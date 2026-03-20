@@ -98,6 +98,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         interceptor,
                         KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
                     )
+                    interceptor.loadPersistedKeys()
                 }
             }
             .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
@@ -114,6 +115,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         interceptor,
                         KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
                     )
+                    interceptor.loadPersistedKeys()
                 }
             }
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
