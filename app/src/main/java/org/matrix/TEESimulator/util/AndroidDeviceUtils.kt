@@ -76,42 +76,38 @@ object AndroidDeviceUtils {
         SystemLogger.debug("Boot key and hash initialization complete.")
     }
 
-    /**
-     * Generic initializer for boot properties like the key and hash. It attempts to read from a
-     * system property first, then from a TEE attestation, and finally falls back to a random value
-     * if neither is available.
-     *
-     * @param propertyName The name of the system property (e.g., "ro.boot.vbmeta.digest").
-     * @param attestationValueProvider A function that supplies the value from a cached attestation.
-     * @param expectedSize The expected length of the byte array (e.g., 32 for a SHA-256 digest).
-     * @return The resulting byte array for the property.
-     */
     private fun initializeBootProperty(
         propertyName: String,
         attestationValueProvider: () -> ByteArray?,
         expectedSize: Int,
     ): ByteArray {
-        // 1. Attempt to get the value from the system property.
         getProperty(propertyName, expectedSize)?.let {
             SystemLogger.debug("Using $propertyName from system property: ${it.toHex()}")
+            persistToFile(propertyName, it)
             return it
         }
 
-        // 2. Fallback to the value from a cached TEE attestation.
         try {
             attestationValueProvider()?.let {
                 SystemLogger.debug("Using $propertyName from TEE attestation: ${it.toHex()}")
-                setProperty(propertyName, it) // Persist for consistency
+                setProperty(propertyName, it)
+                persistToFile(propertyName, it)
                 return it
             }
         } catch (e: Exception) {
             SystemLogger.error("Failed to get $propertyName from attestation.", e)
         }
 
-        // 3. As a final fallback, generate a random value.
+        readFromFile(propertyName, expectedSize)?.let {
+            SystemLogger.debug("Using $propertyName from persistent file: ${it.toHex()}")
+            setProperty(propertyName, it)
+            return it
+        }
+
         return generateRandomBytes(expectedSize).also {
             SystemLogger.debug("Using randomly generated $propertyName: ${it.toHex()}")
             setProperty(propertyName, it)
+            persistToFile(propertyName, it)
         }
     }
 
@@ -158,9 +154,36 @@ object AndroidDeviceUtils {
         }
     }
 
-    /** Generates a cryptographically random byte array of a specified length. */
     private fun generateRandomBytes(size: Int): ByteArray =
         ByteArray(size).also { ThreadLocalRandom.current().nextBytes(it) }
+
+    private val PERSIST_DIR = File("/data/adb/tricky_store")
+
+    private fun fileForProperty(propertyName: String): File = when (propertyName) {
+        "ro.boot.vbmeta.digest" -> File(PERSIST_DIR, "boot_hash.bin")
+        "ro.boot.vbmeta.public_key_digest" -> File(PERSIST_DIR, "boot_key.bin")
+        else -> File(PERSIST_DIR, "${propertyName.replace('.', '_')}.bin")
+    }
+
+    private fun persistToFile(propertyName: String, bytes: ByteArray) {
+        try {
+            fileForProperty(propertyName).writeBytes(bytes)
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to persist $propertyName to file.", e)
+        }
+    }
+
+    private fun readFromFile(propertyName: String, expectedSize: Int): ByteArray? {
+        return try {
+            val file = fileForProperty(propertyName)
+            if (!file.exists()) return null
+            val bytes = file.readBytes()
+            if (bytes.size == expectedSize) bytes else null
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to read $propertyName from file.", e)
+            null
+        }
+    }
 
     // --- Patch Level Properties ---
 
@@ -240,11 +263,10 @@ object AndroidDeviceUtils {
         val resolvedValue = resolveDateKeywords(value)
 
         return when {
-            // "device_default" indicates falling back to the system property.
             resolvedValue.equals("device_default", ignoreCase = true) -> null
-            // "no" indicates this value should not be reported.
             resolvedValue.equals("no", ignoreCase = true) -> DO_NOT_REPORT
-            // Otherwise, parse the resolved date string.
+            resolvedValue.equals("prop", ignoreCase = true) ->
+                parsePatchLevelValue(SystemProperties.get("ro.build.version.security_patch", ""), isLong)
             else -> parsePatchLevelValue(resolvedValue, isLong)
         }
     }
