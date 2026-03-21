@@ -250,9 +250,14 @@ object ConfigurationManager {
                 )
             }
 
-            // Parse global and per-package configurations.
-            val newGlobalLevel = parseLines(contextLines[""])
-            contextLines.remove("") // Remove global context to iterate over packages next
+            var newGlobalLevel = parseLines(contextLines[""])
+            contextLines.remove("")
+
+            // system=prop means all components should derive from device props
+            if (newGlobalLevel?.system.equals("prop", ignoreCase = true)) {
+                SystemLogger.info("system=prop: forcing boot/vendor to derive from device props")
+                newGlobalLevel = newGlobalLevel?.copy(boot = "prop", vendor = "prop")
+            }
 
             for ((pkg, lines) in contextLines) {
                 parseLines(lines)?.let { newPackageLevels[pkg] = it }
@@ -282,8 +287,10 @@ object ConfigurationManager {
 
             val file = if (event != DELETE) File(configRoot, path) else null
             when (path) {
-                TARGET_PACKAGES_FILE -> loadTargetPackages(file!!)
-                PATCH_LEVEL_FILE -> loadPatchLevelConfig(file!!)
+                TARGET_PACKAGES_FILE -> file?.let { loadTargetPackages(it) }
+                    ?: SystemLogger.warning("$TARGET_PACKAGES_FILE was deleted.")
+                PATCH_LEVEL_FILE -> file?.let { loadPatchLevelConfig(it) }
+                    ?: SystemLogger.warning("$PATCH_LEVEL_FILE was deleted.")
                 // Any change to an XML file is assumed to be a keybox.
                 // The cache in KeyBoxManager will handle reloading it on its next use.
                 else ->
