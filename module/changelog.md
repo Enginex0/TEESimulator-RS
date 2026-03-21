@@ -1,3 +1,53 @@
+## TEESimulator-RS v5.1: Interception Architecture Rewrite
+
+Major release. 27 files changed, 2300 lines rewritten. The entire Kotlin interception layer has been rebuilt with a clean architecture, proper AIDL alignment, and significantly lower binder overhead.
+
+### Interception Layer Rewrite
+- KeyMintSecurityLevelInterceptor completely restructured: GeneratedKeyInfo now carries full KeyMintAttestation instead of nullable stub, eliminating scattered null checks across every operation path
+- SoftwareOperation rewritten with sealed CryptoPrimitive interface separating Signer, Verifier, Encryptor, and Decryptor into isolated implementations with proper JCA algorithm mapping
+- KeystoreErrorCode centralized object replaces scattered magic numbers for all KeyMint and Keystore2 error codes
+- listEntries moved from pre-transact parameter caching to post-transact injection, eliminating a race condition where cached params could go stale
+- deleteKey now handles both APP domain (by alias) and KEY_ID domain (by nspace) resolution paths correctly
+- AuthorizeCreate and AndroidPermissionUtils removed, authorization logic consolidated into the operation dispatch path
+- DeviceAttestationService removed, attestation routing simplified into the main interceptor
+
+### Software Crypto Operations
+- GCM nonce returned in CreateOperationResponse.parameters for encrypt operations, matching real KeyMint HAL behavior
+- updateAad correctly throws INVALID_TAG on non-AEAD operations instead of silently succeeding
+- Cipher algorithm mapping cleaned up: dropped CTR block mode and RSA_PKCS1_1_5_SIGN padding that caused JCA provider mismatches
+- All crypto exceptions wrapped as ServiceSpecificException with correct KeyMint error codes instead of raw exceptions
+
+### Attestation & Certificate Generation
+- CertificateGenerator rewritten with clean Kotlin Pair return type instead of Android's util.Pair
+- AttestationBuilder field ordering aligned with AOSP KeyDescription ASN.1 schema
+- Unique ID computation follows KeyMint HAL spec: HMAC-SHA256(temporal_counter || AAID || reset_flag, HBK) truncated to 128 bits
+- Patch level logging removed from hot path to reduce logcat noise on every attestation
+
+### Configuration & Device Properties
+- ConfigurationManager target package parsing refactored: mode/package extraction deduplicated across GENERATE/PATCH/AUTO branches
+- system=prop forced boot/vendor override removed, now respects explicit per-component patch level configuration
+- FileObserver delete handler simplified with direct file access instead of defensive null-checks
+- AndroidDeviceUtils expanded with additional device property accessors for attestation fields
+
+### Binder Performance
+- Safe parcel reads at 6 deserialization sites, replacing force-unwrap NPE paths with early-return on null. A single NPE generates a full stack trace that blocks the binder thread for ~2ms
+- teeResponses cache populated on generateKey/importKey post-transact, reducing getKeyEntry from 2+ binder round-trips to 1
+- pingBinder liveness check removed from pre-transact failure path, eliminating a synchronous IPC call on every failed transaction
+- Native transaction code filtering at C++ level, skipping JNI entirely for PING/INTERFACE/DUMP
+
+### Dynamic SecurityLevel Binder Registration
+- Intercepts getSecurityLevel replies to register hooks on every new BBinder instance keystore2 returns, not just the initial one from setup
+- Identity hash deduplication prevents double-hooking when keystore2 returns the same binder across multiple calls
+- Resolves apps that call getSecurityLevel independently and receive a different binder than the one registered at startup
+
+### Build & Packaging
+- Rust native build task integrated into Gradle with cargo-ndk for aarch64/armv7/x86/x86_64
+- Module ZIP includes all 4 native libraries (libTEESimulator, libsupervisor, libcertgen, libinject)
+- customize.sh extraction restored for supervisor daemon and native cert gen library
+- TeeLatencySimulator added as standalone utility for log-normal hardware latency emulation
+
+---
+
 ## TEESimulator-RS v5.0: AOSP Compliance Overhaul
 
 Major release integrating 30+ AOSP compliance improvements from upstream PR #157 analysis, layered on top of our StrongBox hardening and native cert gen architecture.
