@@ -364,7 +364,7 @@ class SoftwareOperation(
 
     fun abort() {
         checkActive()
-        finalized = true
+        isFinalized = true
         primitive.abort()
         SystemLogger.debug("[SoftwareOp TX_ID: $txId] Operation aborted.")
     }
