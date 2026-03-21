@@ -157,7 +157,7 @@ data class KeyMintAttestation(
 
 /** Maps to AOSP field = Integer */
 private fun Array<KeyParameter>.findBoolean(tag: Int): Boolean? =
-    this.find { it.tag == tag }?.value?.boolValue
+    if (this.any { it.tag == tag }) true else null
 
 /** Maps to AOSP field = Integer */
 private fun Array<KeyParameter>.findInteger(tag: Int): Int? =
