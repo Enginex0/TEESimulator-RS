@@ -257,7 +257,8 @@ class SoftwareOperation(
 ) {
     private val primitive: CryptoPrimitive
 
-    @Volatile private var finalized = false
+    @Volatile var isFinalized = false
+        private set
 
     init {
         val purpose = params.purpose.firstOrNull()
@@ -294,7 +295,7 @@ class SoftwareOperation(
         }
 
     private fun checkActive() {
-        if (finalized)
+        if (isFinalized)
             throw ServiceSpecificException(
                 KeystoreErrorCode.INVALID_OPERATION_HANDLE,
                 "Operation already finalized.",
@@ -306,10 +307,10 @@ class SoftwareOperation(
         try {
             primitive.updateAad(data)
         } catch (e: ServiceSpecificException) {
-            finalized = true
+            isFinalized = true
             throw e
         } catch (e: Exception) {
-            finalized = true
+            isFinalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to updateAad.", e)
             throw ServiceSpecificException(KeystoreErrorCode.SYSTEM_ERROR, e.message)
         }
@@ -320,10 +321,10 @@ class SoftwareOperation(
         try {
             return primitive.update(data)
         } catch (e: ServiceSpecificException) {
-            finalized = true
+            isFinalized = true
             throw e
         } catch (e: Exception) {
-            finalized = true
+            isFinalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to update operation.", e)
             throw mapToServiceSpecificException(e)
         }
@@ -348,7 +349,7 @@ class SoftwareOperation(
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to finish operation.", e)
             throw mapToServiceSpecificException(e)
         } finally {
-            finalized = true
+            isFinalized = true
         }
     }
 

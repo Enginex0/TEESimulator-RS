@@ -61,8 +61,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             .associate { field -> (field.get(null) as Int) to field.name.split("_")[1] }
     }
 
-    // Keys whose certs were updated via updateSubcomponent; skip re-patching on getKeyEntry.
     private val userUpdatedKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
+    private val deletedSoftwareKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
 
     // Backdoor binder for registering new interceptors at runtime.
     private var backdoorBinder: IBinder? = null
@@ -225,6 +225,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         KeyMintSecurityLevelInterceptor.generatedKeys.containsKey(keyId)
                     KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
                     if (isSoftwareKey) {
+                        deletedSoftwareKeys.add(keyId)
                         SystemLogger.info(
                             "[TX_ID: $txId] Deleted cached keypair ${keyId.alias}, replying with empty response."
                         )
@@ -238,6 +239,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 return TransactionResult.ContinueAndSkipPost
             }
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
+
+            if (deletedSoftwareKeys.remove(keyId)) {
+                return InterceptorUtils.createErrorReply(7) // KEY_NOT_FOUND
+            }
 
             val response =
                 KeyMintSecurityLevelInterceptor.getGeneratedKeyResponse(keyId)

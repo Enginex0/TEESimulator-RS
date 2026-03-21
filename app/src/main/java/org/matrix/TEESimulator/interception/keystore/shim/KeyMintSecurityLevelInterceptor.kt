@@ -51,8 +51,8 @@ class KeyMintSecurityLevelInterceptor(
     private val securityLevel: Int,
 ) : BinderInterceptor() {
 
-    // --- Data Structures for State Management ---
     private val recentOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<Long>>()
+    private val activeOps = ConcurrentHashMap<Int, ConcurrentLinkedDeque<SoftwareOperation>>()
 
     data class GeneratedKeyInfo(
         val keyPair: KeyPair?,
@@ -253,11 +253,17 @@ class KeyMintSecurityLevelInterceptor(
         timestamps.addLast(System.nanoTime())
     }
 
-    /**
-     * Handles the `createOperation` transaction. It checks if the operation is for a key that was
-     * generated in software. If so, it creates a software-based operation handler. Otherwise, it
-     * lets the call proceed to the real hardware service.
-     */
+    private fun pruneOpsForUid(callingUid: Int, newOp: SoftwareOperation) {
+        val ops = activeOps.computeIfAbsent(callingUid) { ConcurrentLinkedDeque() }
+        ops.removeIf { it.isFinalized }
+        while (ops.size >= MAX_CONCURRENT_OPS_PER_UID) {
+            val oldest = ops.pollFirst() ?: break
+            oldest.abort()
+            SystemLogger.debug("Pruned oldest op for uid=$callingUid (LRU eviction)")
+        }
+        ops.addLast(newOp)
+    }
+
     private fun handleCreateOperation(
         txId: Long,
         callingUid: Int,
@@ -402,6 +408,7 @@ class KeyMintSecurityLevelInterceptor(
                         effectiveParams,
                         opLatency,
                     )
+                pruneOpsForUid(callingUid, softwareOperation)
 
                 // Decrement usage counter on finish; delete key when exhausted.
                 if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
@@ -956,6 +963,7 @@ class KeyMintSecurityLevelInterceptor(
         private const val STRONGBOX_MAX_CONCURRENT_OPS = 4
         private const val STRONGBOX_OP_WINDOW_NS = 10_000_000_000L
         private const val MAX_ALIAS_LENGTH = 256 * 1024
+        private const val MAX_CONCURRENT_OPS_PER_UID = 15
 
         private fun isStrongBoxCapable(params: KeyMintAttestation): Boolean = when (params.algorithm) {
             Algorithm.RSA -> params.keySize <= 2048
@@ -1056,7 +1064,13 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
-        // Clears all cached keys.
+        fun invalidatePatchedChains(reason: String? = null) {
+            val count = patchedChains.size
+            if (count == 0) return
+            patchedChains.clear()
+            SystemLogger.info("Invalidated $count patched cert chains${reason?.let { " due to $it" } ?: ""}.")
+        }
+
         fun clearAllGeneratedKeys(reason: String? = null) {
             val count = generatedKeys.size
             val reasonMessage = reason?.let { " due to $it" } ?: ""
