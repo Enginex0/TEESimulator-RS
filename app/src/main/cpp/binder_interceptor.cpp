@@ -612,14 +612,8 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     Parcel pre_req, pre_resp;
     writeTransactionData(pre_req, tx_id, target, code, flags, request);
 
-    status_t pre_status = callback->transact(intercept::kPreTransact, pre_req, &pre_resp);
-    if (pre_status != OK) {
-        if (callback->pingBinder() != OK) {
-            LOGE("[TX_ID: %" PRIu64 "] Interceptor DEAD. Blocking to prevent attestation leak.", tx_id);
-            result = DEAD_OBJECT;
-            return true;
-        }
-        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed (not dead). Forwarding.", tx_id);
+    if (callback->transact(intercept::kPreTransact, pre_req, &pre_resp) != OK) {
+        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed. Forwarding original call.", tx_id);
         return false;
     }
 

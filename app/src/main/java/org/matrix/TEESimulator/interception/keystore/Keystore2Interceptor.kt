@@ -289,6 +289,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 callingPid,
             )
 
+            if (!ConfigurationManager.shouldPatch(callingUid))
+                return TransactionResult.SkipTransaction
+
             runCatching {
                     val response = reply.readTypedObject(KeyEntryResponse.CREATOR)!!
                     val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)

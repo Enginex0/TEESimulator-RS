@@ -82,7 +82,8 @@ class KeyMintSecurityLevelInterceptor(
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return TransactionResult.ContinueAndSkipPost
                 SystemLogger.info(
                     "[TX_ID: $txId] Forward to post-importKey hook for ${keyDescriptor.alias}[${keyDescriptor.nspace}]"
                 )
@@ -140,6 +141,10 @@ class KeyMintSecurityLevelInterceptor(
                     metadata.authorizations =
                         InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
                     patchedChains[keyId] = newChain
+                    teeResponses[keyId] = KeyEntryResponse().apply {
+                        this.metadata = metadata
+                        iSecurityLevel = original
+                    }
                     SystemLogger.debug("Cached patched certificate chain for imported key $keyId.")
                     return InterceptorUtils.createTypedObjectReply(metadata)
                 }
@@ -148,8 +153,10 @@ class KeyMintSecurityLevelInterceptor(
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-            val params = data.createTypedArray(KeyParameter.CREATOR)!!
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                ?: return TransactionResult.SkipTransaction
+            val params = data.createTypedArray(KeyParameter.CREATOR)
+                ?: return TransactionResult.SkipTransaction
             val parsedParams = KeyMintAttestation(params)
             val forced = data.readBoolean()
             if (forced)
@@ -157,7 +164,8 @@ class KeyMintSecurityLevelInterceptor(
                     "[TX_ID: $txId] Current operation has a very high pruning power."
                 )
             val response: CreateOperationResponse =
-                reply.readTypedObject(CreateOperationResponse.CREATOR)!!
+                reply.readTypedObject(CreateOperationResponse.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
             SystemLogger.verbose(
                 "[TX_ID: $txId] CreateOperationResponse: ${response.iOperation} ${response.operationChallenge}"
             )
@@ -190,9 +198,6 @@ class KeyMintSecurityLevelInterceptor(
             val metadata: KeyMetadata =
                 reply.readTypedObject(KeyMetadata.CREATOR)
                     ?: return TransactionResult.SkipTransaction
-            KeyMintAttestation(
-                metadata.authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
-            )
             val originalChain =
                 CertificateHelper.getCertificateChain(metadata)
                     ?: return TransactionResult.SkipTransaction
@@ -201,16 +206,23 @@ class KeyMintSecurityLevelInterceptor(
 
                 // Cache the newly patched chain to ensure consistency across subsequent API calls.
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                val key = metadata.key!!
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
+                val key = metadata.key
+                    ?: return TransactionResult.SkipTransaction
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
                 metadata.authorizations =
                     InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
 
-                // We must clean up cached generated keys before storing the patched chain
                 cleanupKeyData(keyId)
                 patchedChains[keyId] = newChain
+
+                teeResponses[keyId] = KeyEntryResponse().apply {
+                    this.metadata = metadata
+                    iSecurityLevel = original
+                }
+
                 SystemLogger.debug(
                     "Cached patched certificate chain for $keyId. (${key.alias} [${key.domain}, ${key.nspace}])"
                 )
@@ -232,9 +244,9 @@ class KeyMintSecurityLevelInterceptor(
         data: Parcel,
     ): TransactionResult {
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-        val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+        val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+            ?: return TransactionResult.ContinueAndSkipPost
 
-        // Resolve key descriptor to a generated key via nspace (KEY_ID) or alias (APP).
         val resolvedEntry: Map.Entry<KeyIdentifier, GeneratedKeyInfo>? =
             when (keyDescriptor.domain) {
                 Domain.KEY_ID -> {
@@ -414,13 +426,15 @@ class KeyMintSecurityLevelInterceptor(
     private fun handleGenerateKey(txId: Long, callingUid: Int, callingPid: Int, data: Parcel): TransactionResult {
         return runCatching {
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return@runCatching TransactionResult.ContinueAndSkipPost
                 val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
                 SystemLogger.debug(
                     "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
                 )
 
-                val params = data.createTypedArray(KeyParameter.CREATOR)!!
+                val params = data.createTypedArray(KeyParameter.CREATOR)
+                    ?: return@runCatching TransactionResult.ContinueAndSkipPost
                 val parsedParams = KeyMintAttestation(params)
 
                 val challenge = parsedParams.attestationChallenge
@@ -478,8 +492,14 @@ class KeyMintSecurityLevelInterceptor(
 
                 val isAuto = ConfigurationManager.isAutoMode(callingUid)
 
+                val isStrongBox = securityLevel == SecurityLevel.STRONGBOX
+
                 when {
                     forceGenerate -> doSoftwareGeneration(
+                        callingUid, keyDescriptor, attestationKey, parsedParams, isAttestKeyRequest
+                    )
+                    // StrongBox before TEE-race: broken StrongBox HALs must never reach raceTeePatch
+                    isAuto && isStrongBox -> doSoftwareGeneration(
                         callingUid, keyDescriptor, attestationKey, parsedParams, isAttestKeyRequest
                     )
                     isAuto && !teeFunctional -> raceTeePatch(

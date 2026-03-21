@@ -109,17 +109,17 @@ abstract class BinderInterceptor : Binder() {
      * `handlePostTransact`).
      */
     final override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
-        // The native hook prepends a transaction ID to the data parcel.
         val txId = data.readLong()
-        val result =
+        val result = try {
             when (code) {
-                // These codes are defined in the native layer to distinguish hook types.
                 PRE_TRANSACT_CODE -> handlePreTransact(txId, data)
                 POST_TRANSACT_CODE -> handlePostTransact(txId, data)
                 else -> return super.onTransact(code, data, reply, flags)
             }
-
-        // The reply parcel is guaranteed to be non-null for our custom transactions.
+        } catch (e: Throwable) {
+            SystemLogger.error("[TX_ID: $txId] Interceptor exception, falling through to HAL", e)
+            TransactionResult.ContinueAndSkipPost
+        }
         writeResultToReply(result, reply!!)
         return true
     }

@@ -35,8 +35,11 @@ object App {
     fun main(args: Array<String>) {
         SystemLogger.info("Welcome to TEESimulator!")
 
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            SystemLogger.error("Uncaught exception on ${thread.name}", throwable)
+        }
+
         try {
-            // Initialize the Android framework environment
             prepareEnvironment()
             // Initialize and start the appropriate keystore interceptors.
             initializeInterceptors()
