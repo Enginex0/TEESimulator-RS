@@ -15,36 +15,38 @@ import android.system.keystore2.KeyParameters
 import java.security.KeyPair
 import java.security.Signature
 import java.security.SignatureException
+import java.util.concurrent.locks.LockSupport
+import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
+import javax.crypto.IllegalBlockSizeException
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
 
-/** Keystore2 error codes for ServiceSpecificException. Negative = KeyMint, positive = Keystore. */
 internal object KeystoreErrorCode {
-    const val INVALID_OPERATION_HANDLE = -28
-    const val VERIFICATION_FAILED = -30
-    const val UNSUPPORTED_PURPOSE = -2
-    const val INCOMPATIBLE_PURPOSE = -3
-    const val SYSTEM_ERROR = 4
-    const val TOO_MUCH_DATA = 21
-    const val KEY_EXPIRED = -25
-    const val KEY_NOT_YET_VALID = -24
+    val INVALID_OPERATION_HANDLE: Int by lazy { resolve("ErrorCode", "INVALID_OPERATION_HANDLE", -28) }
+    val VERIFICATION_FAILED: Int by lazy { resolve("ErrorCode", "VERIFICATION_FAILED", -30) }
+    val UNSUPPORTED_PURPOSE: Int by lazy { resolve("ErrorCode", "UNSUPPORTED_PURPOSE", -2) }
+    val INCOMPATIBLE_PURPOSE: Int by lazy { resolve("ErrorCode", "INCOMPATIBLE_PURPOSE", -3) }
+    val INVALID_ARGUMENT: Int by lazy { resolve("ErrorCode", "INVALID_ARGUMENT", -38) }
+    val INVALID_TAG: Int by lazy { resolve("ErrorCode", "INVALID_TAG", -40) }
+    val INVALID_INPUT_LENGTH: Int by lazy { resolve("ErrorCode", "INVALID_INPUT_LENGTH", -21) }
+    val INCOMPATIBLE_KEY: Int by lazy { resolve("ErrorCode", "INCOMPATIBLE_KEY", -31) }
+    val INCOMPATIBLE_ALGORITHM: Int by lazy { resolve("ErrorCode", "INCOMPATIBLE_ALGORITHM", -18) }
+    val KEY_EXPIRED: Int by lazy { resolve("ErrorCode", "KEY_EXPIRED", -25) }
+    val KEY_NOT_YET_VALID: Int by lazy { resolve("ErrorCode", "KEY_NOT_YET_VALID", -24) }
+    val CALLER_NONCE_PROHIBITED: Int by lazy { resolve("ErrorCode", "CALLER_NONCE_PROHIBITED", -55) }
+    val UNKNOWN_ERROR: Int by lazy { resolve("ErrorCode", "UNKNOWN_ERROR", -1000) }
+    val SYSTEM_ERROR: Int by lazy { resolve("ResponseCode", "SYSTEM_ERROR", 4, keystore = true) }
+    val TOO_MUCH_DATA: Int by lazy { resolve("ResponseCode", "TOO_MUCH_DATA", 21, keystore = true) }
+    val PERMISSION_DENIED: Int by lazy { resolve("ResponseCode", "PERMISSION_DENIED", 6, keystore = true) }
+    val KEY_NOT_FOUND: Int by lazy { resolve("ResponseCode", "KEY_NOT_FOUND", 7, keystore = true) }
 
-    /** KeyMint ErrorCode::CALLER_NONCE_PROHIBITED */
-    const val CALLER_NONCE_PROHIBITED = -55
-
-    /** KeyMint ErrorCode::INVALID_ARGUMENT */
-    const val INVALID_ARGUMENT = -38
-
-    /** KeyMint ErrorCode::INVALID_TAG */
-    const val INVALID_TAG = -40
-
-    /** Keystore2 ResponseCode::PERMISSION_DENIED */
-    const val PERMISSION_DENIED = 6
-
-    /** Keystore2 ResponseCode::KEY_NOT_FOUND */
-    const val KEY_NOT_FOUND = 7
+    private fun resolve(enumName: String, field: String, fallback: Int, keystore: Boolean = false): Int {
+        val pkg = if (keystore) "android.system.keystore2" else "android.hardware.security.keymint"
+        return runCatching { Class.forName("$pkg.$enumName").getField(field).getInt(null) }
+            .getOrDefault(fallback)
+    }
 }
 
 // A sealed interface to represent the different cryptographic operations we can perform.
@@ -99,8 +101,9 @@ private object JcaAlgorithmMapper {
             when (params.blockMode.firstOrNull()) {
                 BlockMode.ECB -> "ECB"
                 BlockMode.CBC -> "CBC"
+                BlockMode.CTR -> "CTR"
                 BlockMode.GCM -> "GCM"
-                else -> "ECB" // Default for RSA
+                else -> "ECB"
             }
         val padding =
             when (params.padding.firstOrNull()) {
@@ -183,8 +186,10 @@ private class CipherPrimitive(
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
             init(opMode, cryptoKey)
         }
+    private val isAead = params.blockMode.firstOrNull() == BlockMode.GCM
 
     override fun updateAad(data: ByteArray?) {
+        if (!isAead) throw ServiceSpecificException(KeystoreErrorCode.INVALID_TAG)
         if (data != null) cipher.updateAAD(data)
     }
 
@@ -247,6 +252,7 @@ class SoftwareOperation(
     keyPair: KeyPair?,
     secretKey: javax.crypto.SecretKey?,
     params: KeyMintAttestation,
+    private val latencyFloorMs: Long = 0L,
     var onFinishCallback: (() -> Unit)? = null,
 ) {
     private val primitive: CryptoPrimitive
@@ -319,25 +325,40 @@ class SoftwareOperation(
         } catch (e: Exception) {
             finalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to update operation.", e)
-            throw ServiceSpecificException(KeystoreErrorCode.SYSTEM_ERROR, e.message)
+            throw mapToServiceSpecificException(e)
         }
     }
 
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
         checkActive()
+        val startNs = if (latencyFloorMs > 0) System.nanoTime() else 0L
         try {
             val result = primitive.finish(data, signature)
             SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
+            if (latencyFloorMs > 0) {
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+                val delayMs = latencyFloorMs - elapsedMs
+                if (delayMs > 0) LockSupport.parkNanos(delayMs * 1_000_000)
+            }
             onFinishCallback?.invoke()
             return result
         } catch (e: ServiceSpecificException) {
             throw e
         } catch (e: Exception) {
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to finish operation.", e)
-            throw ServiceSpecificException(KeystoreErrorCode.SYSTEM_ERROR, e.message)
+            throw mapToServiceSpecificException(e)
         } finally {
             finalized = true
         }
+    }
+
+    private fun mapToServiceSpecificException(e: Exception): ServiceSpecificException = when (e) {
+        is ServiceSpecificException -> e
+        is SignatureException -> ServiceSpecificException(KeystoreErrorCode.VERIFICATION_FAILED, e.message)
+        is BadPaddingException -> ServiceSpecificException(KeystoreErrorCode.INVALID_ARGUMENT, e.message)
+        is IllegalBlockSizeException -> ServiceSpecificException(KeystoreErrorCode.INVALID_INPUT_LENGTH, e.message)
+        is java.security.InvalidKeyException -> ServiceSpecificException(KeystoreErrorCode.INCOMPATIBLE_KEY, e.message)
+        else -> ServiceSpecificException(KeystoreErrorCode.UNKNOWN_ERROR, e.message)
     }
 
     fun abort() {
