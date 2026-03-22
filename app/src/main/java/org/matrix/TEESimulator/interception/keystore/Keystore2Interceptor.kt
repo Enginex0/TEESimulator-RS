@@ -392,13 +392,13 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                                 callingUid,
                             )
 
-                        val newNspace = SecureRandom().nextLong()
-                        response.metadata.key?.let { it.nspace = newNspace }
+                        val key = response.metadata.key!!
+                        key.nspace = SecureRandom().nextLong()
                         KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
                             KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
                                 keyData.first,
                                 null,
-                                newNspace,
+                                key.nspace,
                                 response,
                                 parsedParameters,
                             )
