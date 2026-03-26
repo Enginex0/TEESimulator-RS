@@ -164,9 +164,8 @@ object ConfigurationManager {
                         newModes[pkg] = Mode.PATCH
                         newKeyboxes[pkg] = currentKeybox
                     }
-                    // No suffix means AUTO mode.
                     else -> {
-                        newModes[trimmedLine] = Mode.AUTO
+                        newModes[trimmedLine] = Mode.GENERATE
                         newKeyboxes[trimmedLine] = currentKeybox
                     }
                 }
