@@ -403,10 +403,7 @@ class KeyMintSecurityLevelInterceptor(
     }
 
     private fun handleGenerateKey(txId: Long, callingUid: Int, callingPid: Int, data: Parcel): TransactionResult {
-        if (data.dataSize() > MAX_ALIAS_LENGTH) {
-            SystemLogger.warning("Skipping oversized transaction: ${data.dataSize()} bytes")
-            return TransactionResult.ContinueAndSkipPost
-        }
+        val oversized = data.dataSize() > MAX_ALIAS_LENGTH
 
         return runCatching {
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
@@ -476,7 +473,8 @@ class KeyMintSecurityLevelInterceptor(
                 val isAttestKeyRequest = parsedParams.isAttestKey()
 
                 val forceGenerate =
-                    ConfigurationManager.shouldGenerate(callingUid) ||
+                    oversized ||
+                        ConfigurationManager.shouldGenerate(callingUid) ||
                         (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
                         (attestationKey != null &&
                             isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
