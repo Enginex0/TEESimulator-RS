@@ -16,7 +16,7 @@ const OID_KEY_USAGE: &[u64] = &[2, 5, 29, 15];
 
 pub fn build_certificate_chain(
     key_pair: &GeneratedKeyPair,
-    attestation_ext_der: &[u8],
+    attestation_ext_der: Option<&[u8]>,
     keybox: &ParsedKeybox,
     params: &CertGenParams,
 ) -> Result<Vec<Vec<u8>>> {
@@ -33,7 +33,7 @@ pub fn build_certificate_chain(
 
 fn build_leaf_cert(
     key_pair: &GeneratedKeyPair,
-    attestation_ext_der: &[u8],
+    attestation_ext_der: Option<&[u8]>,
     keybox: &ParsedKeybox,
     params: &CertGenParams,
 ) -> Result<Vec<u8>> {
@@ -63,7 +63,6 @@ fn build_leaf_cert(
         timestamp_to_datetime(params.cert_not_after)?
     };
 
-    // Extensions
     let extensions_der = build_extensions(attestation_ext_der, &params.purposes)?;
 
     // TBS Certificate
@@ -256,19 +255,19 @@ fn extract_rsa_spki(pkcs8_der: &[u8]) -> Result<Vec<u8>> {
     Ok(encode_der_sequence(&[&alg_id, &pub_key_bits]))
 }
 
-fn build_extensions(attestation_ext_der: &[u8], purposes: &[i32]) -> Result<Vec<u8>> {
+fn build_extensions(attestation_ext_der: Option<&[u8]>, purposes: &[i32]) -> Result<Vec<u8>> {
     let mut extensions: Vec<Vec<u8>> = Vec::new();
 
-    // KeyUsage extension (critical)
     let ku_byte = map_key_usage_byte(purposes);
     if ku_byte != 0 {
         let ku_ext = build_key_usage_extension(ku_byte);
         extensions.push(ku_ext);
     }
 
-    // Attestation extension (non-critical)
-    let attest_ext = build_extension(&encode_der_oid(ATTESTATION_OID), false, attestation_ext_der);
-    extensions.push(attest_ext);
+    if let Some(attest_der) = attestation_ext_der {
+        let attest_ext = build_extension(&encode_der_oid(ATTESTATION_OID), false, attest_der);
+        extensions.push(attest_ext);
+    }
 
     Ok(encode_der_sequence_of(&extensions))
 }

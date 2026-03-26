@@ -708,7 +708,8 @@ class KeyMintSecurityLevelInterceptor(
 
             val attestVersion = AndroidDeviceUtils.getAttestVersion(securityLevel)
             val keymasterVersion = AndroidDeviceUtils.getKeymasterVersion(securityLevel)
-            val appId = AttestationBuilder.createApplicationId(callingUid)
+            val hasChallenge = params.attestationChallenge != null
+            val appId = if (hasChallenge) AttestationBuilder.createApplicationId(callingUid) else null
 
             val config = CertGenConfig(
                 algorithm = params.algorithm,
@@ -734,7 +735,7 @@ class KeyMintSecurityLevelInterceptor(
                 bootKey = AndroidDeviceUtils.bootKey,
                 bootHash = AndroidDeviceUtils.bootHash,
                 creationDatetime = System.currentTimeMillis(),
-                attestationApplicationId = appId.octets,
+                attestationApplicationId = appId?.octets ?: ByteArray(0),
                 moduleHash = if (attestVersion >= 400) AndroidDeviceUtils.moduleHash else null,
                 idBrand = params.brand,
                 idDevice = params.device,

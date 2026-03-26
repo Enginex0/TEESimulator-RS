@@ -62,11 +62,14 @@ fn generate_attested_inner(env: &mut JNIEnv, config: &JObject) -> Result<jbyteAr
 
     let keybox = keybox::parse_keybox(&params.keybox_cert_chain, &params.keybox_private_key)?;
 
-    let attest_ext = attestation::build_attestation_extension(&params)?;
+    let attest_ext = match params.attestation_challenge {
+        Some(_) => Some(attestation::build_attestation_extension(&params)?),
+        None => None,
+    };
 
     let cert_chain = certbuilder::build_certificate_chain(
         &key_pair,
-        &attest_ext,
+        attest_ext.as_deref(),
         &keybox,
         &params,
     )?;

@@ -238,10 +238,11 @@ object CertificateGenerator {
         if (keyUsageBits != 0) {
             builder.addExtension(Extension.keyUsage, true, KeyUsage(keyUsageBits))
         }
-        // Add our custom, simulated attestation extension.
-        builder.addExtension(
-            AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
-        )
+        if (params.attestationChallenge != null) {
+            builder.addExtension(
+                AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
+            )
+        }
 
         val signerAlgorithm =
             when (signingKeyPair.private.algorithm) {
