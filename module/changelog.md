@@ -13,6 +13,11 @@ Repository consolidation release. All tee-rebuild work merged as the new main br
 - Oversized transactions routed to software gen instead of crashing
 - Operation-time params (BLOCK_MODE, PADDING, DIGEST) passed through to CipherPrimitive
 
+### Banking App Compatibility
+- Bare `target.txt` entries now default to AUTO mode, resolved at config level to PATCH (working TEE) or GENERATE (broken TEE)
+- Fixes BHIM and similar banking apps that require TEE-backed attestation keys
+- Restores v5.0 behavior where AUTO was resolved before the interceptor dispatch, avoiding the non-deterministic `raceTeePatch` path
+
 ### Infrastructure
 - Version scheme changed to semver (v6.0.0)
 - Repository moved to TEESimulator-RS as canonical source
