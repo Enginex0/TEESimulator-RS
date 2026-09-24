@@ -100,13 +100,21 @@ private object JcaAlgorithmMapper {
                         "Unsupported cipher algorithm: ${params.algorithm}",
                     )
             }
+        // KeyMint block modes only apply to AES. Apps can still generate RSA
+        // keys with BLOCK_MODE tags (e.g. CBC), but JCA only exposes RSA as
+        // "RSA/ECB/<padding>", so "RSA/CBC/PKCS1Padding" throws
+        // NoSuchAlgorithmException and the operation fails.
         val blockMode =
-            when (params.blockMode.firstOrNull()) {
-                BlockMode.ECB -> "ECB"
-                BlockMode.CBC -> "CBC"
-                BlockMode.CTR -> "CTR"
-                BlockMode.GCM -> "GCM"
-                else -> "ECB"
+            if (params.algorithm == Algorithm.RSA) {
+                "ECB"
+            } else {
+                when (params.blockMode.firstOrNull()) {
+                    BlockMode.ECB -> "ECB"
+                    BlockMode.CBC -> "CBC"
+                    BlockMode.CTR -> "CTR"
+                    BlockMode.GCM -> "GCM"
+                    else -> "ECB"
+                }
             }
         val padding =
             when (params.padding.firstOrNull()) {
