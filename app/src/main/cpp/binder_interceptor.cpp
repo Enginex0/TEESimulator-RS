@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <utils/StrongPointer.h>
 
+#include <array>
 #include <atomic>
 #include <cinttypes>
 #include <map>
@@ -141,7 +142,16 @@ constexpr uint32_t kActionContinueAndSkipPost = 5;
 constexpr uint32_t kBackdoorCode = 0xdeadbeef;
 
 // Strings for LibBinder hooks
-constexpr std::string_view kBinderLibName = "/libbinder.so";
+//
+// The platform libbinder may be shipped under more than one file name. Starting with the
+// Android 17 canary builds it is packaged into libcore_bundle.so, and /system/lib64/libbinder.so
+// is merely a symlink to it. The kernel resolves symlinks when populating /proc/<pid>/maps, so
+// the entry reads ".../libcore_bundle.so" and matching on "/libbinder.so" alone finds nothing.
+// Candidates are probed in priority order; the first one present in the maps wins.
+constexpr std::array<std::string_view, 2> kBinderLibNames = {
+    "/libbinder.so",
+    "/libcore_bundle.so",
+};
 constexpr std::string_view kIoctlSymbol = "ioctl";
 
 } // namespace intercept
@@ -685,18 +695,23 @@ bool initialize_hooks() {
     ino_t binder_ino = 0;
     bool found = false;
 
-    for (const auto &map : maps) {
-        if (map.path.ends_with(intercept::kBinderLibName)) {
-            binder_dev = map.dev;
-            binder_ino = map.inode;
-            found = true;
-            LOGD("Found libbinder at: %s", map.path.c_str());
+    for (const auto &lib_name : intercept::kBinderLibNames) {
+        for (const auto &map : maps) {
+            if (map.path.ends_with(lib_name)) {
+                binder_dev = map.dev;
+                binder_ino = map.inode;
+                found = true;
+                LOGI("Found libbinder at: %s", map.path.c_str());
+                break;
+            }
+        }
+        if (found) {
             break;
         }
     }
 
     if (!found) {
-        LOGE("Could not find libbinder.so in memory maps.");
+        LOGE("Could not find libbinder in memory maps.");
         return false;
     }
 
