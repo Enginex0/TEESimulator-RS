@@ -411,6 +411,7 @@ object AndroidDeviceUtils {
 
     private val osVersionMap =
         mapOf(
+            37 to 170000, // Android 17; keep compatible with compileSdk 36.
             Build.VERSION_CODES.BAKLAVA to 160000,
             Build.VERSION_CODES.VANILLA_ICE_CREAM to 150000,
             Build.VERSION_CODES.UPSIDE_DOWN_CAKE to 140000,
