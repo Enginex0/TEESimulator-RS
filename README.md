@@ -120,6 +120,18 @@ Controls global `ro.boot.*` property spoofing. Values: `auto` (default), `force`
 
 In `auto`, Oplus-family devices (OnePlus/OPPO/realme/Oplus) skip boot-state prop spoofing to avoid conflicts with vendor TEE services such as ultrasonic fingerprint calibration. Create `/data/adb/tricky_store/boot_props_mode` with `force` to restore the old behavior, or `disable` to turn it off on any device.
 
+On Xiaomi/Redmi/Poco devices, the module also normalizes the vendor `ro.secureboot.*` aliases when they exist. This prevents `ro.secureboot.lockstate` from continuing to report `unlocked` after the standard AVB properties have been spoofed.
+
+The module uses the bundled resetprop-rs for these changes. The initial daemon startup is delayed by 30 seconds to allow camera services to initialize; supervised restarts are not delayed. System-service UIDs other than NFC and shell, and installed packages whose names contain `camera`, bypass key-operation interception; keystore maintenance remains intercepted for system UID. Camera UIDs are refreshed across users when packages or users change and periodically.
+
+### disable_soter_forge
+
+The SOTER forge waits until boot completes before binding to the optional `com.tencent.soter.soterserver` package. Create an empty `/data/adb/tricky_store/disable_soter_forge` file before startup to disable this compatibility feature.
+
+### disable_hardware_attestation_probes
+
+On devices where hardware attestation probes cause camera instability, create an empty `/data/adb/tricky_store/disable_hardware_attestation_probes` file before startup. This replaces per-algorithm and StrongBox capability probes with the general TEE verdict; it can therefore misreport whether a particular algorithm or StrongBox can attest. Without the file, the original probes remain enabled.
+
 ## Building from source
 
 You need JDK 21, the Android SDK and NDK 29, Rust (stable) with the `aarch64-linux-android` target, and `cargo-ndk`.
@@ -131,6 +143,8 @@ cd TEESimulator-RS
 ```
 
 The ZIPs land in `out/`. Gradle runs `cargo ndk` for you to cross-compile `libcertgen.so`. To build on CI instead, push to `main` or run Actions > Build > Run workflow.
+
+Dependabot checks Gradle, Rust, GitHub Actions, and the LSPlt submodule for dependency updates.
 
 ## Compatibility
 
@@ -154,6 +168,14 @@ The ZIPs land in `out/`. Gradle runs `cargo ndk` for you to cross-compile `libce
 - [ring](https://github.com/briansmith/ring) for the Rust cryptography
 - [fatalcoder524](https://github.com/fatalcoder524) for contributions and collaboration
 - [huguangares](https://github.com/huguangares) for collaboration and testing
+- [Gitawake](https://github.com/Gitawake) for [Android 17 attestation](https://github.com/Enginex0/TEESimulator-RS/pull/69)
+- [HsukqiLee](https://github.com/HsukqiLee) for [Android 17 Binder library compatibility](https://github.com/Enginex0/TEESimulator-RS/pull/68)
+- [pqhaz3925](https://github.com/pqhaz3925) for [RSA cipher mapping](https://github.com/Enginex0/TEESimulator-RS/pull/63)
+- [yueryang](https://github.com/yueryang) and Kimi for [SOTER boot safety and flashable artifacts](https://github.com/Enginex0/TEESimulator-RS/pull/61)
+- [cscomic](https://github.com/cscomic) for the [release metadata proposal](https://github.com/Enginex0/TEESimulator-RS/pull/55); release metadata now follows the built artifact instead of the proposal's older, inconsistent URL
+- [plainor](https://github.com/plainor) for [Xiaomi boot-state aliases and packaging fixes](https://github.com/Enginex0/TEESimulator-RS/pull/47)
+- [Mat1RX](https://github.com/Mat1RX) for [StrongBox operation forwarding](https://github.com/Enginex0/TEESimulator-RS/pull/46)
+- [aartzz](https://github.com/aartzz) for [daemon-specific UID spoofing and camera compatibility](https://github.com/Enginex0/TEESimulator-RS/pull/42)
 
 ## License
 

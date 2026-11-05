@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.security.KeyStoreException
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import java.io.File
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -92,6 +93,11 @@ object DeviceAttestationService {
 
     private val attestableVerdicts = ConcurrentHashMap<String, Boolean>()
     private val attestProbesInFlight = ConcurrentHashMap<String, AtomicBoolean>()
+    private val disableHardwareProbes by lazy {
+        File("/data/adb/tricky_store/disable_hardware_attestation_probes").exists().also {
+            if (it) SystemLogger.warning("Per-algorithm hardware attestation probes are disabled")
+        }
+    }
 
     /**
      * Whether the real hardware can attest an RSA key at the requested security level. AUTO dispatch
@@ -103,11 +109,13 @@ object DeviceAttestationService {
      * the device into forging an attestation it could serve.
      */
     fun isRsaAttestable(strongBox: Boolean): Boolean =
-        isHardwareAttestable(if (strongBox) rsaStrongBoxProbe else rsaTeeProbe)
+        if (disableHardwareProbes) isTeeFunctional
+        else isHardwareAttestable(if (strongBox) rsaStrongBoxProbe else rsaTeeProbe)
 
     /** Whether the real hardware can attest an EC key at the requested security level. */
     fun isEcAttestable(strongBox: Boolean): Boolean =
-        isHardwareAttestable(if (strongBox) ecStrongBoxProbe else ecTeeProbe)
+        if (disableHardwareProbes) isTeeFunctional
+        else isHardwareAttestable(if (strongBox) ecStrongBoxProbe else ecTeeProbe)
 
     private fun isHardwareAttestable(probe: ProbeSpec): Boolean {
         attestableVerdicts[probe.keyAlias]?.let { return it }
