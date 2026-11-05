@@ -308,6 +308,7 @@ abstract class BinderInterceptor : Binder() {
             target: IBinder,
             interceptor: BinderInterceptor,
             filteredCodes: IntArray = intArrayOf(),
+            interceptSystemMaintenance: Boolean = false,
         ): Boolean {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
@@ -316,6 +317,7 @@ abstract class BinderInterceptor : Binder() {
                 data.writeStrongBinder(interceptor)
                 data.writeInt(filteredCodes.size)
                 for (code in filteredCodes) data.writeInt(code)
+                data.writeInt(if (interceptSystemMaintenance) 1 else 0)
                 val ok = backdoor.transact(REGISTER_INTERCEPTOR_CODE, data, reply, 0)
                 if (ok) {
                     SystemLogger.info(

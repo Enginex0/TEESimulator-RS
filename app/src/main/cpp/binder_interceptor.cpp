@@ -272,6 +272,7 @@ class BinderInterceptor : public BBinder {
         wp<IBinder> target;
         sp<IBinder> callback_interface;
         std::vector<uint32_t> filtered_codes;
+        bool system_maintenance;
     };
 
     mutable std::shared_mutex registry_mutex_;
@@ -280,10 +281,13 @@ class BinderInterceptor : public BBinder {
 public:
     BinderInterceptor() = default;
 
-    bool shouldIntercept(const wp<BBinder> &target, uint32_t code) const {
+    bool shouldIntercept(const wp<BBinder> &target, uint32_t code, uint32_t uid,
+                         bool dynamic_bypass) const {
         std::shared_lock lock(registry_mutex_);
         auto it = registry_.find(target);
         if (it == registry_.end()) return false;
+        if (transaction_policy::bypassTransaction(uid, dynamic_bypass, it->second.system_maintenance))
+            return false;
         const auto &codes = it->second.filtered_codes;
         return codes.empty() || std::find(codes.begin(), codes.end(), code) != codes.end();
     }
@@ -429,12 +433,11 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
         txn_data->sender_euid = 1000;
         LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
         hijack = false; // Never hijack to avoid recursion
-    } else if (transaction_policy::bypassSystemUid(txn_data->sender_euid)) {
-        return;
     } else {
+        bool dynamic_bypass;
         {
             std::shared_lock lock(g_bypass_mutex);
-            if (g_bypass_uids.count(txn_data->sender_euid) != 0) return;
+            dynamic_bypass = g_bypass_uids.count(txn_data->sender_euid) != 0;
         }
         // Check 3: Normal interception based on registry of monitored binders
         // Safe casting based on Binder driver ABI
@@ -449,7 +452,8 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             // This is safe because we are holding a strong reference.
             wp<BBinder> wp_target = target_binder_ptr;
 
-            if (g_interceptor_instance->shouldIntercept(wp_target, txn_data->code)) {
+            if (g_interceptor_instance->shouldIntercept(wp_target, txn_data->code,
+                                                        txn_data->sender_euid, dynamic_bypass)) {
                 info.transaction_code = txn_data->code;
                 info.target_binder = wp_target; // Assign the valid weak pointer
                 hijack = true;
@@ -606,10 +610,14 @@ status_t BinderInterceptor::handleRegister(const Parcel &data) {
         LOGI("Interceptor registered for binder %p (all codes)", target.get());
     }
 
+    int32_t system_maintenance = 0;
+    if (data.dataAvail() >= sizeof(int32_t) && data.readInt32(&system_maintenance) != OK)
+        return BAD_VALUE;
+
     wp<IBinder> weak_target = target;
 
     std::unique_lock lock(registry_mutex_);
-    registry_[weak_target] = {weak_target, callback, std::move(codes)};
+    registry_[weak_target] = {weak_target, callback, std::move(codes), system_maintenance != 0};
 
     return OK;
 }

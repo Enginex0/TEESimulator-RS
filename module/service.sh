@@ -1,8 +1,8 @@
 MODDIR=${0%/*}
 cd $MODDIR
 
-# Fork-based supervisor for instant restart
-./supervisor ./daemon "$MODDIR" &
+# Delay the first launch without delaying subsequent supervised restarts.
+( sleep 30; exec ./supervisor ./daemon "$MODDIR" ) &
 
 # Debug builds ship diag.sh; its presence enables the external-storage diagnostic plane.
 if [ -f "$MODDIR/diag.sh" ]; then

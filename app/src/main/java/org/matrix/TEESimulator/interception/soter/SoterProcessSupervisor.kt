@@ -10,6 +10,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.SystemProperties
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
@@ -215,11 +216,19 @@ object SoterProcessSupervisor {
                 return
             }
             SystemLogger.debug("SOTER backdoor absent; injecting libTEESimulator.so")
-            injectedProcess = process
-            if (!injectLibrary(process.pid)) {
-                SystemLogger.debug("SOTER injection failed; scheduling re-bind")
-                scheduleRetry()
-                return
+            when (injectLibrary(process.pid)) {
+                InjectionResult.PRE_ENTRY_FAILURE -> {
+                    SystemLogger.warning("SOTER injection failed before entry; retrying")
+                    scheduleRetry()
+                    return
+                }
+                InjectionResult.UNCERTAIN -> {
+                    injectedProcess = process
+                    SystemLogger.warning("SOTER injection outcome uncertain; awaiting respawn")
+                    scheduleRetry()
+                    return
+                }
+                InjectionResult.SUCCESS -> injectedProcess = process
             }
             backdoor = BinderInterceptor.getBackdoor(soterBinder)
         }
@@ -261,14 +270,21 @@ object SoterProcessSupervisor {
                 null
             }
 
-    private fun injectLibrary(pid: Int): Boolean =
-        runCatching {
+    private fun injectLibrary(pid: Int): InjectionResult {
+        val process =
+            try {
                 Runtime.getRuntime()
                     .exec(arrayOf("./inject", pid.toString(), "libTEESimulator.so", "entry"))
-                    .waitFor() == 0
+            } catch (e: IOException) {
+                SystemLogger.warning("SOTER injector could not start", e)
+                return InjectionResult.PRE_ENTRY_FAILURE
             }
-            .getOrElse {
-                SystemLogger.debug { "SOTER inject exec failed: $it" }
-                false
-            }
+        return try {
+            classifyInjectorExitCode(process.waitFor())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            SystemLogger.warning("SOTER injector wait interrupted", e)
+            InjectionResult.UNCERTAIN
+        }
+    }
 }

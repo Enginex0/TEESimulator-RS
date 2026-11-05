@@ -122,7 +122,7 @@ In `auto`, Oplus-family devices (OnePlus/OPPO/realme/Oplus) skip boot-state prop
 
 On Xiaomi/Redmi/Poco devices, the module also normalizes the vendor `ro.secureboot.*` aliases when they exist. This prevents `ro.secureboot.lockstate` from continuing to report `unlocked` after the standard AVB properties have been spoofed.
 
-The module uses the bundled resetprop-rs for these changes. Daemon startup is delayed by 30 seconds to allow camera services to initialize. System-service UIDs other than NFC and installed packages whose names contain `camera` bypass Binder interception.
+The module uses the bundled resetprop-rs for these changes. The initial daemon startup is delayed by 30 seconds to allow camera services to initialize; supervised restarts are not delayed. System-service UIDs other than NFC and shell, and installed packages whose names contain `camera`, bypass key-operation interception; keystore maintenance remains intercepted for system UID. Camera UIDs are refreshed across users when packages or users change and periodically.
 
 ### disable_soter_forge
 

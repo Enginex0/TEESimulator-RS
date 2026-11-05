@@ -10,5 +10,13 @@ int main() {
     assert(bypassSystemUid(0));
     assert(bypassSystemUid(1000));
     assert(!bypassSystemUid(1027));
+    assert(!bypassSystemUid(2000));
     assert(!bypassSystemUid(10000));
+    assert(bypassTransaction(1000, false, false));
+    assert(!bypassTransaction(1000, false, true));
+    assert(!bypassTransaction(1000, true, true));
+    assert(bypassTransaction(0, false, true));
+    assert(!bypassTransaction(2000, false, false));
+    assert(bypassTransaction(10123, true, false));
+    assert(!bypassTransaction(10123, false, false));
 }
