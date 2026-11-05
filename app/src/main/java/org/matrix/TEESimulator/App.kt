@@ -25,6 +25,8 @@ import org.matrix.TEESimulator.util.AndroidDeviceUtils
 object App {
     // The delay in milliseconds before retrying to initialize the interceptor.
     private const val RETRY_DELAY_MS = 1000L
+    lateinit var appContext: Context
+        private set
 
     /**
      * The main entry point of the TEESimulator application.
@@ -41,6 +43,7 @@ object App {
 
         try {
             val systemContext = prepareEnvironment()
+            appContext = systemContext
 
             // Spoof boot-state props before any hook attaches, so keystore2's
             // cached snapshot reflects the spoofed values.
@@ -64,7 +67,9 @@ object App {
             NativeCertGen.initialize("/data/adb/modules/tricky_store/libcertgen.so")
 
             // Mount the SOTER forge on the on-demand soterserver process. The supervisor
-            // binds and (re)injects on its own thread, returning at once so it never blocks the loop.
+            // binds and (re)injects on its own thread, returning at once so it never blocks the
+            // loop; the first bind is deferred until sys.boot_completed so the boot window is
+            // never disturbed (issue #48).
             SoterProcessSupervisor.start(systemContext)
 
             // This starts the message queue processing. It blocks here indefinitely

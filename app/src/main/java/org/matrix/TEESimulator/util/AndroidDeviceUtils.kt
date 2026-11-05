@@ -24,6 +24,11 @@ import org.w3c.dom.Element
  * information that is critical for generating valid attestations.
  */
 object AndroidDeviceUtils {
+    private const val RESETPROP_RS = "/data/adb/modules/tricky_store/resetprop-rs"
+
+    private fun resetpropCommand(name: String, value: String): Array<String> =
+        if (File(RESETPROP_RS).canExecute()) arrayOf(RESETPROP_RS, "--stealth", name, value)
+        else arrayOf("resetprop", name, value)
 
     /**
      * Internal constant to signify that a patch level should not be included in the attestation.
@@ -164,7 +169,7 @@ object AndroidDeviceUtils {
         val hex = bytes.toHex()
         try {
             SystemLogger.debug("Setting system property '$name' to: $hex")
-            val command = arrayOf("resetprop", name, hex)
+            val command = resetpropCommand(name, hex)
             val process = Runtime.getRuntime().exec(command)
             val exitCode = process.waitFor()
 
@@ -190,7 +195,7 @@ object AndroidDeviceUtils {
     internal fun setProperty(name: String, value: String) {
         try {
             SystemLogger.debug("Setting system property '$name' to: $value")
-            val command = arrayOf("resetprop", name, value)
+            val command = resetpropCommand(name, value)
             val process = Runtime.getRuntime().exec(command)
             val exitCode = process.waitFor()
 
@@ -411,6 +416,7 @@ object AndroidDeviceUtils {
 
     private val osVersionMap =
         mapOf(
+            37 to 170000, // Android 17; keep compatible with compileSdk 36.
             Build.VERSION_CODES.BAKLAVA to 160000,
             Build.VERSION_CODES.VANILLA_ICE_CREAM to 150000,
             Build.VERSION_CODES.UPSIDE_DOWN_CAKE to 140000,

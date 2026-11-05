@@ -257,6 +257,8 @@ abstract class BinderInterceptor : Binder() {
         private const val REGISTER_INTERCEPTOR_CODE = 1
         // Code used by the backdoor binder to unregister an interceptor.
         private const val UNREGISTER_INTERCEPTOR_CODE = 2
+        private const val SET_BYPASS_UIDS_CODE = 3
+        private val daemonToken = Binder()
 
         // --- Hook Type Codes ---
         // Indicates that the call is for a pre-transaction hook.
@@ -284,6 +286,7 @@ abstract class BinderInterceptor : Binder() {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
             return try {
+                data.writeStrongBinder(daemonToken)
                 if (binder.transact(BACKDOOR_TRANSACTION_CODE, data, reply, 0)) {
                     SystemLogger.debug("Backdoor access granted for binder: $binder")
                     reply.readStrongBinder()
@@ -305,6 +308,7 @@ abstract class BinderInterceptor : Binder() {
             target: IBinder,
             interceptor: BinderInterceptor,
             filteredCodes: IntArray = intArrayOf(),
+            interceptSystemMaintenance: Boolean = false,
         ): Boolean {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
@@ -313,6 +317,7 @@ abstract class BinderInterceptor : Binder() {
                 data.writeStrongBinder(interceptor)
                 data.writeInt(filteredCodes.size)
                 for (code in filteredCodes) data.writeInt(code)
+                data.writeInt(if (interceptSystemMaintenance) 1 else 0)
                 val ok = backdoor.transact(REGISTER_INTERCEPTOR_CODE, data, reply, 0)
                 if (ok) {
                     SystemLogger.info(
@@ -341,6 +346,24 @@ abstract class BinderInterceptor : Binder() {
                 SystemLogger.info("Unregistered interceptor for target: $target")
             } catch (e: Exception) {
                 SystemLogger.error("Failed to unregister binder interceptor.", e)
+            } finally {
+                data.recycle()
+                reply.recycle()
+            }
+        }
+
+        fun setBypassUids(backdoor: IBinder, uids: Collection<Int>): Boolean {
+            val data = Parcel.obtain()
+            val reply = Parcel.obtain()
+            return try {
+                data.writeInt(uids.size)
+                uids.forEach(data::writeInt)
+                backdoor.transact(SET_BYPASS_UIDS_CODE, data, reply, 0).also {
+                    if (!it) SystemLogger.error("Failed to set dynamic bypass UIDs.")
+                }
+            } catch (e: Exception) {
+                SystemLogger.error("Failed to set dynamic bypass UIDs.", e)
+                false
             } finally {
                 data.recycle()
                 reply.recycle()

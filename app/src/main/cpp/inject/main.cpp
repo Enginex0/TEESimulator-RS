@@ -94,6 +94,9 @@ namespace constants {
 constexpr size_t kMagicLength = 16;
 // Length of the random magic string for socket paths.
 
+// Exit code shared with the SOTER supervisor for failures before entry is called.
+constexpr int kPreEntryFailure = 2;
+
 constexpr size_t kMaxPathLength = PATH_MAX;
 // Maximum length for file paths.
 
@@ -836,7 +839,7 @@ private:
  *  (Currently hardcoded to 'entry' internally but kept as param for future flexibility)
  * @return True if injection was successful, false otherwise.
  */
-bool inject_library(int pid, const char *lib_path, const char *entry_name) {
+bool inject_library(int pid, const char *lib_path, const char *entry_name, bool &entry_attempted) {
     LOGI("Starting injection of library '%s' (entry: '%s') into process %d.", lib_path, entry_name, pid);
 
     // 1. Ptrace attachment using RAII.
@@ -941,6 +944,7 @@ bool inject_library(int pid, const char *lib_path, const char *entry_name) {
         uintptr_t entry_addr = *entry_opt;
 
         // 9. Call the remote entry point function.
+        entry_attempted = true;
         if (!remote_call_entry(pid, current_regs, entry_addr, handle,
                                reinterpret_cast<uintptr_t>(libc_return_addr))) {
             LOGE("Failed to call remote entry point '%s'.", entry_name);
@@ -961,7 +965,7 @@ bool inject_library(int pid, const char *lib_path, const char *entry_name) {
  *
  * @param argc Number of command-line arguments.
  * @param argv Array of command-line argument strings.
- * @return EXIT_SUCCESS on successful injection, EXIT_FAILURE otherwise.
+ * @return 2 on a confirmed failure before entry, EXIT_FAILURE on an uncertain failure.
  */
 int main(int argc, char **argv) {
 
@@ -972,7 +976,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  lib_path   - Absolute path to the shared library to inject\n");
         fprintf(stderr, "  entry_name - Entry point symbol name (e.g., 'entry') in "
                         "the library\n");
-        return EXIT_FAILURE;
+        return inject::constants::kPreEntryFailure;
     }
 
     // Parse and validate PID.
@@ -980,7 +984,7 @@ int main(int argc, char **argv) {
     long pid_long = strtol(argv[1], &endptr, 10);
     if (*endptr != '\0' || pid_long <= 0 || pid_long > INT_MAX) {
         fprintf(stderr, "Error: Invalid PID '%s'. PID must be a positive integer.\n", argv[1]);
-        return EXIT_FAILURE;
+        return inject::constants::kPreEntryFailure;
     }
     int pid = static_cast<int>(pid_long);
 
@@ -988,29 +992,30 @@ int main(int argc, char **argv) {
     char resolved_path[inject::constants::kMaxPathLength];
     if (realpath(argv[2], resolved_path) == nullptr) {
         fprintf(stderr, "Error: Failed to resolve library path '%s': %s\n", argv[2], strerror(errno));
-        return EXIT_FAILURE;
+        return inject::constants::kPreEntryFailure;
     }
 
     if (access(resolved_path, R_OK) != 0) {
         fprintf(stderr, "Error: Library file '%s' is not readable: %s\n", resolved_path, strerror(errno));
-        return EXIT_FAILURE;
+        return inject::constants::kPreEntryFailure;
     }
 
     // Validate entry name.
     const char *entry_name = argv[3];
     if (strlen(entry_name) == 0) {
         fprintf(stderr, "Error: Entry name cannot be empty.\n");
-        return EXIT_FAILURE;
+        return inject::constants::kPreEntryFailure;
     }
 
     LOGI("TEESimulator injector starting...");
-    bool success = inject::inject_library(pid, resolved_path, entry_name);
+    bool entry_attempted = false;
+    bool success = inject::inject_library(pid, resolved_path, entry_name, entry_attempted);
 
     if (success) {
         LOGI("Injection completed successfully.");
         return EXIT_SUCCESS;
     } else {
         LOGE("Injection failed.");
-        return EXIT_FAILURE;
+        return entry_attempted ? EXIT_FAILURE : inject::constants::kPreEntryFailure;
     }
 }

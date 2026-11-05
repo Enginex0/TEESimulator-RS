@@ -116,12 +116,18 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private fun setupMaintenanceInterceptor(backdoor: IBinder) {
         runCatching {
                 ServiceManager.getService("android.security.maintenance")?.let { maintenance ->
+                    val codes = Keystore2MaintenanceInterceptor.interceptedCodes
+                    if (codes.isEmpty()) {
+                        SystemLogger.warning("No maintenance transaction codes found; skipping lifecycle hook.")
+                        return@let
+                    }
                     SystemLogger.info("Found maintenance binder. Registering interceptor...")
                     register(
                         backdoor,
                         maintenance,
                         Keystore2MaintenanceInterceptor,
-                        Keystore2MaintenanceInterceptor.interceptedCodes,
+                        codes,
+                        interceptSystemMaintenance = true,
                     )
                 }
                     ?: SystemLogger.warning(

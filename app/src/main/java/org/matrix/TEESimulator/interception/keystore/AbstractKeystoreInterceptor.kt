@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.interception.keystore
 import android.os.IBinder
 import android.os.ServiceManager
 import kotlin.system.exitProcess
+import org.matrix.TEESimulator.App
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -32,6 +33,7 @@ abstract class AbstractKeystoreInterceptor : BinderInterceptor() {
     protected lateinit var keystoreService: IBinder
     private var injectionAttempted = false
     private var retryCount = 0
+    private var cameraUidMonitor: CameraUidMonitor? = null
     private val maxRetries = 5
 
     /**
@@ -72,6 +74,7 @@ abstract class AbstractKeystoreInterceptor : BinderInterceptor() {
 
     private fun setupInterceptor(service: IBinder, backdoor: IBinder) {
         keystoreService = service
+        cameraUidMonitor = CameraUidMonitor(App.appContext, backdoor).also { it.start() }
         SystemLogger.info("Registering interceptor for service: $serviceName")
         register(backdoor, service, this, interceptedCodes)
         service.linkToDeath(createDeathRecipient(), 0)
