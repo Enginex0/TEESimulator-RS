@@ -31,3 +31,9 @@ Third-party components:
        GNU General Public License v2.0 WITH Linux-syscall-note exception.
    Information about the exception:
        https://spdx.org/licenses/Linux-syscall-note.html
+
+4. The bundled resetprop-rs binaries are from Enginex0/resetprop-rs v0.6.0:
+       https://github.com/Enginex0/resetprop-rs/tree/v0.6.0
+   They are licensed under the MIT license in module/bin/resetprop-LICENSE.
+   The binaries also include Rust libc, licensed under the MIT license in
+   module/bin/resetprop-libc-LICENSE.

@@ -13,6 +13,7 @@ import android.system.keystore2.KeyEntryResponse
 import java.security.SecureRandom
 import java.security.cert.Certificate
 import java.util.concurrent.ConcurrentHashMap
+import org.matrix.TEESimulator.App
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -103,6 +104,18 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
      * security level sub-services (e.g., TEE, StrongBox).
      */
     override fun onInterceptorReady(service: IBinder, backdoor: IBinder) {
+        try {
+            val cameraUids =
+                App.appContext.packageManager.getInstalledApplications(0)
+                    .filter { it.packageName.contains("camera", ignoreCase = true) }
+                    .map { it.uid }
+                    .toSet()
+            if (setBypassUids(backdoor, cameraUids)) {
+                SystemLogger.info("Configured ${cameraUids.size} camera bypass UIDs")
+            }
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to discover camera bypass UIDs.", e)
+        }
         val keystoreInterface = IKeystoreService.Stub.asInterface(service)
         setupSecurityLevelInterceptors(keystoreInterface, backdoor)
         setupMaintenanceInterceptor(backdoor)

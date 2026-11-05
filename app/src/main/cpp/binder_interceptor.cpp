@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <utils/StrongPointer.h>
 
+#include <array>
 #include <atomic>
 #include <cinttypes>
 #include <map>
@@ -15,10 +16,12 @@
 #include <shared_mutex>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include "logging.hpp"
 #include "lsplt.hpp"
+#include "transaction_policy.hpp"
 
 /**
  * =========================================================================================
@@ -128,6 +131,7 @@ namespace intercept {
 // Interceptor protocol codes (User space agreement between App and Interceptor Service)
 constexpr uint32_t kRegisterInterceptor = 1;
 constexpr uint32_t kUnregisterInterceptor = 2;
+constexpr uint32_t kSetBypassUids = 3;
 
 constexpr uint32_t kPreTransact = 1;
 constexpr uint32_t kPostTransact = 2;
@@ -141,7 +145,16 @@ constexpr uint32_t kActionContinueAndSkipPost = 5;
 constexpr uint32_t kBackdoorCode = 0xdeadbeef;
 
 // Strings for LibBinder hooks
-constexpr std::string_view kBinderLibName = "/libbinder.so";
+//
+// The platform libbinder may be shipped under more than one file name. Starting with the
+// Android 17 canary builds it is packaged into libcore_bundle.so, and /system/lib64/libbinder.so
+// is merely a symlink to it. The kernel resolves symlinks when populating /proc/<pid>/maps, so
+// the entry reads ".../libcore_bundle.so" and matching on "/libbinder.so" alone finds nothing.
+// Candidates are probed in priority order; the first one present in the maps wins.
+constexpr std::array<std::string_view, 2> kBinderLibNames = {
+    "/libbinder.so",
+    "/libcore_bundle.so",
+};
 constexpr std::string_view kIoctlSymbol = "ioctl";
 
 } // namespace intercept
@@ -207,6 +220,29 @@ int (*g_original_ioctl)(int fd, int request, ...) = nullptr;
 
 // Unique ID generator for transactions
 static std::atomic<uint64_t> g_transaction_id_counter = 0;
+static std::atomic<pid_t> g_daemon_pid = 0;
+static std::mutex g_daemon_mutex;
+static sp<IBinder> g_daemon_token;
+static sp<IBinder::DeathRecipient> g_daemon_death_recipient;
+static std::shared_mutex g_bypass_mutex;
+static std::unordered_set<uint32_t> g_bypass_uids;
+
+class DaemonDeathRecipient : public IBinder::DeathRecipient {
+public:
+    explicit DaemonDeathRecipient(pid_t pid) : pid_(pid) {}
+
+    void binderDied(const wp<IBinder>& who) override {
+        std::lock_guard lock(g_daemon_mutex);
+        if (g_daemon_pid == pid_ && who == wp<IBinder>(g_daemon_token)) {
+            g_daemon_pid = 0;
+            g_daemon_token.clear();
+            g_daemon_death_recipient.clear();
+        }
+    }
+
+private:
+    pid_t pid_;
+};
 
 // Context info to pass from the ioctl hook (processBinderWriteRead) to the BinderStub.
 struct ThreadTransactionInfo {
@@ -263,6 +299,7 @@ protected:
 private:
     status_t handleRegister(const Parcel &data);
     status_t handleUnregister(const Parcel &data);
+    status_t handleSetBypassUids(const Parcel &data);
 
     // Helpers to serialize data for the remote callback interface
     status_t writeTransactionData(Parcel &out, uint64_t tx_id, sp<BBinder> target, uint32_t code, uint32_t flags,
@@ -315,6 +352,22 @@ protected:
 
         // 2. Handle special "Backdoor" to get the Interceptor reference
         if (info.transaction_code == intercept::kBackdoorCode && info.target_binder == nullptr && reply) {
+            sp<IBinder> daemon_token;
+            if (data.readStrongBinder(&daemon_token) != OK || !daemon_token) return BAD_VALUE;
+            pid_t pid = IPCThreadState::self()->getCallingPid();
+            if (pid <= 0) return BAD_VALUE;
+            std::lock_guard lock(g_daemon_mutex);
+            if (g_daemon_pid != pid || g_daemon_token != daemon_token) {
+                sp<DaemonDeathRecipient> death_recipient = sp<DaemonDeathRecipient>::make(pid);
+                status_t status = daemon_token->linkToDeath(death_recipient);
+                if (status != OK) {
+                    LOGE("Could not monitor daemon death: %d", status);
+                    return status;
+                }
+                g_daemon_token = daemon_token;
+                g_daemon_death_recipient = death_recipient;
+                g_daemon_pid = pid;
+            }
             LOGD("Backdoor handshake received.");
             reply->writeStrongBinder(g_interceptor_instance);
             return OK;
@@ -368,15 +421,22 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
         info.transaction_code = intercept::kBackdoorCode;
         info.target_binder = nullptr;
         hijack = true;
-    // Check 2: Spoof uid of KeyStore requests from the daemon to bypass permission check
-    } else if (txn_data->sender_euid == 0) {
+    // Check 2: Spoof only the daemon's root requests; other system callers pass through.
+    } else if (transaction_policy::isDaemonTransaction(
+                   txn_data->sender_euid, txn_data->sender_pid, g_daemon_pid.load())) {
         // The kernel driver fills sender_euid.
         // libbinder.so trusts this value to populate IPCThreadState.
         txn_data->sender_euid = 1000;
         LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
         hijack = false; // Never hijack to avoid recursion
-    // Check 3: Normal interception based on registry of monitored binders
+    } else if (transaction_policy::bypassSystemUid(txn_data->sender_euid)) {
+        return;
     } else {
+        {
+            std::shared_lock lock(g_bypass_mutex);
+            if (g_bypass_uids.count(txn_data->sender_euid) != 0) return;
+        }
+        // Check 3: Normal interception based on registry of monitored binders
         // Safe casting based on Binder driver ABI
         RefBase::weakref_type *weak_ref = reinterpret_cast<RefBase::weakref_type *>(txn_data->target.ptr);
 
@@ -512,6 +572,8 @@ status_t BinderInterceptor::onTransact(uint32_t code, const Parcel &data, Parcel
         return handleRegister(data);
     case intercept::kUnregisterInterceptor:
         return handleUnregister(data);
+    case intercept::kSetBypassUids:
+        return handleSetBypassUids(data);
     default:
         return BBinder::onTransact(code, data, reply, flags);
     }
@@ -566,6 +628,26 @@ status_t BinderInterceptor::handleUnregister(const Parcel &data) {
     }
     LOGW("Attempted to unregister a non-existent interceptor for binder %p", target.get());
     return NAME_NOT_FOUND;
+}
+
+status_t BinderInterceptor::handleSetBypassUids(const Parcel &data) {
+    int32_t count = 0;
+    if (data.readInt32(&count) != OK || count < 0 ||
+        static_cast<size_t>(count) > data.dataAvail() / sizeof(int32_t)) {
+        return BAD_VALUE;
+    }
+    std::unordered_set<uint32_t> uids;
+    for (int32_t i = 0; i < count; ++i) {
+        int32_t uid = 0;
+        if (data.readInt32(&uid) != OK || uid < 0) return BAD_VALUE;
+        uids.insert(static_cast<uint32_t>(uid));
+    }
+    {
+        std::unique_lock lock(g_bypass_mutex);
+        g_bypass_uids = std::move(uids);
+    }
+    LOGI("Updated dynamic bypass UIDs");
+    return OK;
 }
 
 status_t BinderInterceptor::writeTransactionData(Parcel &out, uint64_t tx_id, sp<BBinder> target, uint32_t code,
@@ -685,18 +767,23 @@ bool initialize_hooks() {
     ino_t binder_ino = 0;
     bool found = false;
 
-    for (const auto &map : maps) {
-        if (map.path.ends_with(intercept::kBinderLibName)) {
-            binder_dev = map.dev;
-            binder_ino = map.inode;
-            found = true;
-            LOGD("Found libbinder at: %s", map.path.c_str());
+    for (const auto &lib_name : intercept::kBinderLibNames) {
+        for (const auto &map : maps) {
+            if (map.path.ends_with(lib_name)) {
+                binder_dev = map.dev;
+                binder_ino = map.inode;
+                found = true;
+                LOGI("Found libbinder at: %s", map.path.c_str());
+                break;
+            }
+        }
+        if (found) {
             break;
         }
     }
 
     if (!found) {
-        LOGE("Could not find libbinder.so in memory maps.");
+        LOGE("Could not find libbinder in memory maps.");
         return false;
     }
 
