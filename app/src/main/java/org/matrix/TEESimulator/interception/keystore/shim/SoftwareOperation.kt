@@ -120,8 +120,16 @@ private object JcaAlgorithmMapper {
         return "$keyAlgo/$blockMode/$padding"
     }
 
+    /**
+     * Maps KeyMint [Digest] integer constants to standard JCA message digest algorithm names
+     * for RSA-OAEP and MGF1 configurations.
+     *
+     * @param digest KeyMint digest integer constant, or null.
+     * @return Standard JCA algorithm name (e.g., "SHA-1", "SHA-256", "MD5").
+     */
     fun mapOaepDigest(digest: Int?): String =
         when (digest) {
+            Digest.MD5 -> "MD5"
             Digest.SHA1 -> "SHA-1"
             Digest.SHA_2_224 -> "SHA-224"
             Digest.SHA_2_256 -> "SHA-256"
@@ -206,9 +214,9 @@ private class CipherPrimitive(
             } else if (params.padding.firstOrNull() == PaddingMode.RSA_OAEP) {
                 val mainDigest = JcaAlgorithmMapper.mapOaepDigest(params.digest.firstOrNull())
                 val mgfDigest =
-                    params.rsaOaepMgfDigest.firstOrNull()?.let {
-                        JcaAlgorithmMapper.mapOaepDigest(it)
-                    } ?: mainDigest
+                    JcaAlgorithmMapper.mapOaepDigest(
+                        params.rsaOaepMgfDigest.firstOrNull() ?: Digest.SHA1
+                    )
                 init(
                     opMode,
                     cryptoKey,
@@ -613,6 +621,14 @@ internal object KeystoreErrorCodes {
 
     val incompatibleDigest: Int by lazy {
         resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_DIGEST", -13)
+    }
+
+    val incompatibleMgfDigest: Int by lazy {
+        resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_MGF_DIGEST", -78)
+    }
+
+    val unsupportedMgfDigest: Int by lazy {
+        resolveField("android.hardware.security.keymint.ErrorCode", "UNSUPPORTED_MGF_DIGEST", -79)
     }
 
     val invalidMacLength: Int by lazy {
