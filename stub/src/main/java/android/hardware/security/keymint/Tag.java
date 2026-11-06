@@ -67,4 +67,6 @@ public @interface Tag {
     int USER_ID = 805306869;
     int USER_SECURE_ID = -1610612234;
     int VENDOR_PATCHLEVEL = 805307086;
+    // KeyMint v5 (Android 17): TagType::ENUM | 11.
+    int ML_DSA_VARIANT = 268435467;
 }

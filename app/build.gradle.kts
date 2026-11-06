@@ -37,7 +37,7 @@ val versionCodeFloorOffset = 5
 val gitCommitCount =
     gitExecutor.execute("git rev-list HEAD --count", rootDir).toInt() + versionCodeFloorOffset
 val gitCommitHash = gitExecutor.execute("git rev-parse --verify --short HEAD", rootDir)
-val verName = "v6.0.1"
+val verName = "v6.1.0"
 
 android {
     namespace = "org.matrix.TEESimulator"
