@@ -616,6 +616,10 @@ internal object KeystoreErrorCodes {
         resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_BLOCK_MODE", -8)
     }
 
+    val unsupportedPaddingMode: Int by lazy {
+        resolveField("android.hardware.security.keymint.ErrorCode", "UNSUPPORTED_PADDING_MODE", -10)
+    }
+
     val incompatiblePaddingMode: Int by lazy {
         resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_PADDING_MODE", -11)
     }
