@@ -224,15 +224,17 @@ class KeyMintSecurityLevelInterceptor(
         } else if (code == GENERATE_KEY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
-            val metadata: KeyMetadata =
-                reply.readTypedObject(KeyMetadata.CREATOR)
-                    ?: return TransactionResult.SkipTransaction
-
+            // keystore2 replaced the alias; drop the old cached key before any early return.
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
             val keyDescriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
             val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+            cleanupKeyData(keyId)
+
+            val metadata: KeyMetadata =
+                reply.readTypedObject(KeyMetadata.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
 
             val originalChain = CertificateHelper.getCertificateChain(metadata)
             if (originalChain == null || originalChain.size <= 1) {
@@ -240,7 +242,6 @@ class KeyMintSecurityLevelInterceptor(
                 // Without this, the cached attested path returns in ~1ms while
                 // the forwarded non-attested path takes ~1.5ms, and
                 // TimingSideChannelProbe flags the 1.55x ratio.
-                cleanupKeyData(keyId)
                 teeResponses[keyId] =
                     KeyEntryResponse().apply {
                         this.metadata = metadata
@@ -280,7 +281,6 @@ class KeyMintSecurityLevelInterceptor(
             // PATCH decode point: the chain we rewrote onto a real TEE generateKey reply.
             AttestationDossier.log(callingUid, txId, "PATCH", newChain.asList())
 
-            cleanupKeyData(keyId)
             patchedChains[keyId] = newChain
             teeResponses[keyId] =
                 KeyEntryResponse().apply {
