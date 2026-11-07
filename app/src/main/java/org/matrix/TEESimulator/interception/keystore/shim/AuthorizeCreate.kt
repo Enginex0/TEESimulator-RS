@@ -2,6 +2,7 @@ package org.matrix.TEESimulator.interception.keystore.shim
 
 import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.BlockMode
+import android.hardware.security.keymint.Digest
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
@@ -44,6 +45,14 @@ object AuthorizeCreate {
         return null
     }
 
+    /**
+     * Validates operation parameters against key authorizations for block mode, padding,
+     * primary digest, and RSA-OAEP MGF1 digests per KeyMint AIDL specifications.
+     *
+     * @param keyParams Authorized key characteristics bound to the key blob.
+     * @param opParams Cryptographic operation parameters requested by caller.
+     * @return Service-specific error code if authorization fails, or null on success.
+     */
     private fun checkOperationAuthorizations(
         keyParams: KeyMintAttestation,
         opParams: KeyMintAttestation,
@@ -51,14 +60,42 @@ object AuthorizeCreate {
         if (opParams.blockMode.any { it !in keyParams.blockMode }) {
             return KeystoreErrorCodes.incompatibleBlockMode
         }
+        if (keyParams.algorithm == Algorithm.RSA && opParams.padding.size != 1) {
+            return KeystoreErrorCodes.unsupportedPaddingMode
+        }
         if (opParams.padding.any { it !in keyParams.padding }) {
             return KeystoreErrorCodes.incompatiblePaddingMode
         }
         if (opParams.digest.any { it !in keyParams.digest }) {
             return KeystoreErrorCodes.incompatibleDigest
         }
-        if (opParams.rsaOaepMgfDigest.any { it !in keyParams.rsaOaepMgfDigest }) {
-            return KeystoreErrorCodes.incompatibleDigest
+        if (opParams.padding.contains(PaddingMode.RSA_OAEP)) {
+            val effectiveMgfDigests =
+                if (opParams.rsaOaepMgfDigest.isEmpty()) {
+                    if (keyParams.rsaOaepMgfDigest.isNotEmpty()) {
+                        listOf(Digest.SHA1)
+                    } else {
+                        emptyList()
+                    }
+                } else {
+                    opParams.rsaOaepMgfDigest
+                }
+
+            val supportedMgfDigests: Set<Int> =
+                setOf(
+                    Digest.MD5,
+                    Digest.SHA1,
+                    Digest.SHA_2_224,
+                    Digest.SHA_2_256,
+                    Digest.SHA_2_384,
+                    Digest.SHA_2_512,
+                )
+            if (effectiveMgfDigests.any { it !in supportedMgfDigests }) {
+                return KeystoreErrorCodes.unsupportedMgfDigest
+            }
+            if (effectiveMgfDigests.any { it !in keyParams.rsaOaepMgfDigest }) {
+                return KeystoreErrorCodes.incompatibleMgfDigest
+            }
         }
 
         if (keyParams.algorithm == Algorithm.AES && opParams.blockMode.contains(BlockMode.GCM)) {
