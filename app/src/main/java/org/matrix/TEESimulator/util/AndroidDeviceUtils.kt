@@ -559,6 +559,7 @@ object AndroidDeviceUtils {
         }
     }
 
+    /** Highest KeyMint version declared in VINTF for [securityLevel], or null. */
     private fun readVintfKeyMintVersion(securityLevel: Int): VintfKeyMintVersion? {
         val files = linkedMapOf<String, File>()
 
@@ -613,6 +614,7 @@ object AndroidDeviceUtils {
             .maxByOrNull { it.attestationVersion }
     }
 
+    /** KeyMint/Keymaster versions a manifest declares for [securityLevel]'s instance. */
     private fun parseKeyMintVersions(
         file: File,
         securityLevel: Int,
@@ -712,9 +714,11 @@ object AndroidDeviceUtils {
         fqnames.any { fqname -> fqnameMatches(fqname, interfaceName, securityLevel) } ||
             interfaces[interfaceName]?.contains(instanceFor(securityLevel)) == true
 
+    /** VINTF instance name for [securityLevel]. */
     private fun instanceFor(securityLevel: Int): String =
         if (securityLevel == SECURITY_LEVEL_STRONGBOX) STRONGBOX_INSTANCE else DEFAULT_INSTANCE
 
+    /** Whether [fqname] names [interfaceName] at [securityLevel]'s instance. */
     private fun fqnameMatches(fqname: String, interfaceName: String, securityLevel: Int): Boolean =
         fqname.substringAfter("::", fqname).substringBefore("/") == interfaceName &&
             fqname.substringAfter("/", "") == instanceFor(securityLevel)
