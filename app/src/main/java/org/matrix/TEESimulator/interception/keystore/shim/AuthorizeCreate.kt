@@ -66,8 +66,8 @@ object AuthorizeCreate {
         if (opParams.digest.any { it !in keyParams.digest }) {
             return KeystoreErrorCodes.incompatibleDigest
         }
-        val effectiveMgfDigests =
-            if (opParams.padding.contains(PaddingMode.RSA_OAEP)) {
+        if (opParams.padding.contains(PaddingMode.RSA_OAEP)) {
+            val effectiveMgfDigests =
                 if (opParams.rsaOaepMgfDigest.isEmpty()) {
                     if (keyParams.rsaOaepMgfDigest.isNotEmpty()) {
                         listOf(Digest.SHA1)
@@ -77,24 +77,22 @@ object AuthorizeCreate {
                 } else {
                     opParams.rsaOaepMgfDigest
                 }
-            } else {
-                opParams.rsaOaepMgfDigest
-            }
 
-        val supportedMgfDigests: Set<Int> =
-            setOf(
-                Digest.MD5,
-                Digest.SHA1,
-                Digest.SHA_2_224,
-                Digest.SHA_2_256,
-                Digest.SHA_2_384,
-                Digest.SHA_2_512,
-            )
-        if (effectiveMgfDigests.any { it !in supportedMgfDigests }) {
-            return KeystoreErrorCodes.unsupportedMgfDigest
-        }
-        if (effectiveMgfDigests.any { it !in keyParams.rsaOaepMgfDigest }) {
-            return KeystoreErrorCodes.incompatibleMgfDigest
+            val supportedMgfDigests: Set<Int> =
+                setOf(
+                    Digest.MD5,
+                    Digest.SHA1,
+                    Digest.SHA_2_224,
+                    Digest.SHA_2_256,
+                    Digest.SHA_2_384,
+                    Digest.SHA_2_512,
+                )
+            if (effectiveMgfDigests.any { it !in supportedMgfDigests }) {
+                return KeystoreErrorCodes.unsupportedMgfDigest
+            }
+            if (effectiveMgfDigests.any { it !in keyParams.rsaOaepMgfDigest }) {
+                return KeystoreErrorCodes.incompatibleMgfDigest
+            }
         }
 
         if (keyParams.algorithm == Algorithm.AES && opParams.blockMode.contains(BlockMode.GCM)) {
