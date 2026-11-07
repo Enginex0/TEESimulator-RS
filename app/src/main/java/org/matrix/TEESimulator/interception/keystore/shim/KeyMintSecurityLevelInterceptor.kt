@@ -720,15 +720,17 @@ class KeyMintSecurityLevelInterceptor(
                 // Devices that can attest keep their genuine chain via PATCH, which strict callers
                 // accept where a forgery is rejected.
                 // An unknown EC curve has no keybox path: forging would substitute a P-256
-                // key under a chain naming the requested curve. Hand it to the real TEE.
-                val unknownEcCurve =
-                    parsedParams.algorithm == Algorithm.EC &&
-                        parsedParams.ecCurve != null &&
-                        parsedParams.ecCurve !in KNOWN_EC_CURVES
+                // key under a chain naming the requested curve. ML-DSA has no software
+                // generator at all. Hand both to the real TEE.
+                val forwardToTee =
+                    parsedParams.algorithm == Algorithm.ML_DSA ||
+                        (parsedParams.algorithm == Algorithm.EC &&
+                            parsedParams.ecCurve != null &&
+                            parsedParams.ecCurve !in KNOWN_EC_CURVES)
 
                 val strongBox = securityLevel == SecurityLevel.STRONGBOX
                 val forceGenerate =
-                    !unknownEcCurve &&
+                    !forwardToTee &&
                         (oversized ||
                             ConfigurationManager.shouldGenerate(callingUid) ||
                             isAttestKeyRequest ||

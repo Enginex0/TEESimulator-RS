@@ -103,6 +103,7 @@ public final class KeyParameterValue implements Parcelable {
         throw new UnsupportedOperationException("STUB!");
     }
 
+    /** KeyMint v5 ML-DSA variant union member. */
     public static KeyParameterValue mlDsaVariant(int _value) {
         throw new UnsupportedOperationException("STUB!");
     }
@@ -231,10 +232,12 @@ public final class KeyParameterValue implements Parcelable {
         throw new UnsupportedOperationException("STUB!");
     }
 
+    /** Returns the ML-DSA variant. */
     public int getMlDsaVariant() {
         throw new UnsupportedOperationException("STUB!");
     }
 
+    /** Sets the ML-DSA variant. */
     public void setMlDsaVariant(int _value) {
         throw new UnsupportedOperationException("STUB!");
     }
