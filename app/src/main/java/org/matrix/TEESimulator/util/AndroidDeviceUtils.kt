@@ -652,8 +652,13 @@ object AndroidDeviceUtils {
                     }
                 KEYMASTER_HAL_NAME ->
                     if (hasInstance(fqnames, interfaces, KEYMASTER_INTERFACE_NAME, securityLevel)) {
+                        // <version> and <interface> declarations are shared by every
+                        // instance in the HAL element; FQNames are per-instance, so only
+                        // take versions from FQNames naming the requested instance.
+                        val matchingFqnames =
+                            fqnames.filter { fqname -> fqnameMatches(fqname, KEYMASTER_INTERFACE_NAME, securityLevel) }
                         (versions.flatMap(::expandHidlVersions) +
-                                fqnames.mapNotNull(::versionFromFqname))
+                                matchingFqnames.mapNotNull(::versionFromFqname))
                             .distinct()
                             .mapNotNull { version ->
                                 expectedLegacyVersions(version)?.let { expected ->
@@ -703,14 +708,16 @@ object AndroidDeviceUtils {
         interfaces: Map<String, Set<String>>,
         interfaceName: String,
         securityLevel: Int,
-    ): Boolean {
-        val instance =
-            if (securityLevel == SECURITY_LEVEL_STRONGBOX) STRONGBOX_INSTANCE else DEFAULT_INSTANCE
-        return fqnames.any { fqname ->
-            fqname.substringAfter("::", fqname).substringBefore("/") == interfaceName &&
-                fqname.substringAfter("/", "") == instance
-        } || interfaces[interfaceName]?.contains(instance) == true
-    }
+    ): Boolean =
+        fqnames.any { fqname -> fqnameMatches(fqname, interfaceName, securityLevel) } ||
+            interfaces[interfaceName]?.contains(instanceFor(securityLevel)) == true
+
+    private fun instanceFor(securityLevel: Int): String =
+        if (securityLevel == SECURITY_LEVEL_STRONGBOX) STRONGBOX_INSTANCE else DEFAULT_INSTANCE
+
+    private fun fqnameMatches(fqname: String, interfaceName: String, securityLevel: Int): Boolean =
+        fqname.substringAfter("::", fqname).substringBefore("/") == interfaceName &&
+            fqname.substringAfter("/", "") == instanceFor(securityLevel)
 
     private fun versionFromFqname(fqname: String): String? =
         FQNAME_VERSION_REGEX.find(fqname)?.groupValues?.getOrNull(1)

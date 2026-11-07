@@ -720,21 +720,30 @@ class KeyMintSecurityLevelInterceptor(
                 // attest RSA in the TEE yet not in StrongBox, so the probe must match the request.
                 // Devices that can attest keep their genuine chain via PATCH, which strict callers
                 // accept where a forgery is rejected.
+                // An unknown EC curve has no keybox path: forging would substitute a P-256
+                // key under a chain naming the requested curve. Hand it to the real TEE.
+                val unknownEcCurve =
+                    parsedParams.algorithm == Algorithm.EC &&
+                        parsedParams.ecCurve != null &&
+                        parsedParams.ecCurve !in KNOWN_EC_CURVES
+
                 val strongBox = securityLevel == SecurityLevel.STRONGBOX
                 val forceGenerate =
-                    oversized ||
-                        ConfigurationManager.shouldGenerate(callingUid) ||
-                        isAttestKeyRequest ||
-                        attestationKey != null ||
-                        hasDeviceIdAttestation ||
-                        (ConfigurationManager.isAutoMode(callingUid) &&
-                            parsedParams.attestationChallenge != null &&
-                            when (parsedParams.algorithm) {
-                                Algorithm.RSA ->
-                                    !DeviceAttestationService.isRsaAttestable(strongBox)
-                                Algorithm.EC -> !DeviceAttestationService.isEcAttestable(strongBox)
-                                else -> false
-                            })
+                    !unknownEcCurve &&
+                        (oversized ||
+                            ConfigurationManager.shouldGenerate(callingUid) ||
+                            isAttestKeyRequest ||
+                            attestationKey != null ||
+                            hasDeviceIdAttestation ||
+                            (ConfigurationManager.isAutoMode(callingUid) &&
+                                parsedParams.attestationChallenge != null &&
+                                when (parsedParams.algorithm) {
+                                    Algorithm.RSA ->
+                                        !DeviceAttestationService.isRsaAttestable(strongBox)
+                                    Algorithm.EC ->
+                                        !DeviceAttestationService.isEcAttestable(strongBox)
+                                    else -> false
+                                }))
 
                 SystemLogger.trace {
                     "[TRACE-$txId] dispatch: forceGen=$forceGenerate hasChallenge=${challenge != null} isSymmetric=$isSymmetric isAttestKey=$isAttestKeyRequest"
@@ -1512,6 +1521,9 @@ class KeyMintSecurityLevelInterceptor(
         private const val MAX_CONCURRENT_OPS_PER_UID = 15
         private const val STRONGBOX_MAX_CONCURRENT_OPS = 4
         private const val STRONGBOX_OP_WINDOW_NS = 10_000_000_000L // 10s
+
+        private val KNOWN_EC_CURVES =
+            setOf(EcCurve.P_224, EcCurve.P_256, EcCurve.P_384, EcCurve.P_521, EcCurve.CURVE_25519)
 
         private fun isStrongBoxCapable(params: KeyMintAttestation): Boolean =
             when (params.algorithm) {
