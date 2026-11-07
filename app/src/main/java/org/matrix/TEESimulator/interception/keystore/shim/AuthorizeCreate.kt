@@ -60,7 +60,7 @@ object AuthorizeCreate {
         if (opParams.blockMode.any { it !in keyParams.blockMode }) {
             return KeystoreErrorCodes.incompatibleBlockMode
         }
-        if (keyParams.algorithm == Algorithm.RSA && opParams.padding.size > 1) {
+        if (keyParams.algorithm == Algorithm.RSA && opParams.padding.size != 1) {
             return KeystoreErrorCodes.unsupportedPaddingMode
         }
         if (opParams.padding.any { it !in keyParams.padding }) {
