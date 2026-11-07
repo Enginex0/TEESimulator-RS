@@ -411,6 +411,9 @@ object AndroidDeviceUtils {
 
     private val osVersionMap =
         mapOf(
+            // SDK 37 (Android 17). The named VERSION_CODES constant does not exist at
+            // compileSdk 36, so use the literal value.
+            SDK_37 to 170000,
             Build.VERSION_CODES.BAKLAVA to 160000,
             Build.VERSION_CODES.VANILLA_ICE_CREAM to 150000,
             Build.VERSION_CODES.UPSIDE_DOWN_CAKE to 140000,
@@ -425,7 +428,9 @@ object AndroidDeviceUtils {
         get() =
             DeviceAttestationService.CachedAttestationData?.osVersion
                 ?: osVersionMap[Build.VERSION.SDK_INT]
-                ?: 160000 // Default to a recent version
+                // Derive a plausible value for unmapped future SDKs instead of pinning to
+                // one release: SDK 26 (Android 8.0) shipped osVersion 80000.
+                ?: (Build.VERSION.SDK_INT - 20) * 10000
 
     private val attestVersionMap =
         mapOf(
@@ -437,6 +442,7 @@ object AndroidDeviceUtils {
             Build.VERSION_CODES.UPSIDE_DOWN_CAKE to 300, // KeyMint 3.0
             Build.VERSION_CODES.VANILLA_ICE_CREAM to 300, // KeyMint 3.0
             Build.VERSION_CODES.BAKLAVA to 400, // KeyMint 4.0
+            SDK_37 to 500, // KeyMint 5.0
         )
 
     /** AOSP-mandated attestation version for the running OS, or null when the SDK is unmapped. */
@@ -453,7 +459,7 @@ object AndroidDeviceUtils {
      * @return The appropriate attestation version number.
      */
     fun getAttestVersion(securityLevel: Int): Int {
-        vintfKeyMintVersion?.let { version ->
+        vintfVersionFor(securityLevel)?.let { version ->
             SystemLogger.debug(
                 "attestVersion=${version.attestationVersion} source=vintf securityLevel=$securityLevel"
             )
@@ -485,7 +491,7 @@ object AndroidDeviceUtils {
      * @return The appropriate Keymaster or KeyMint version number.
      */
     fun getKeymasterVersion(securityLevel: Int): Int {
-        vintfKeyMintVersion?.let { version ->
+        vintfVersionFor(securityLevel)?.let { version ->
             SystemLogger.debug(
                 "keymasterVersion=${version.keymasterVersion} source=vintf securityLevel=$securityLevel"
             )
@@ -505,12 +511,24 @@ object AndroidDeviceUtils {
         val sourcePath: String,
     )
 
+    private const val SECURITY_LEVEL_TEE = 1
+    private const val SECURITY_LEVEL_STRONGBOX = 2
+
+    /** VINTF-resolved KeyMint version for the requested security level, or null. */
+    private fun vintfVersionFor(securityLevel: Int): VintfKeyMintVersion? =
+        if (securityLevel == SECURITY_LEVEL_STRONGBOX) {
+            vintfStrongBoxKeyMintVersion
+        } else {
+            vintfKeyMintVersion
+        }
+
     /**
-     * KeyMint version derived from the device's VINTF manifests, or null when none is readable.
-     * Resolved lazily so the manifest scan happens once, off the attestation hot path.
+     * KeyMint version for the TEE ("default" instance) derived from the device's VINTF
+     * manifests, or null when none is readable. Resolved lazily so the manifest scan
+     * happens once, off the attestation hot path.
      */
     private val vintfKeyMintVersion: VintfKeyMintVersion? by lazy {
-        readVintfKeyMintVersion().also { version ->
+        readVintfKeyMintVersion(SECURITY_LEVEL_TEE).also { version ->
             if (version != null) {
                 SystemLogger.info(
                     "Using KeyMint version from VINTF: attestation=${version.attestationVersion}, " +
@@ -524,7 +542,25 @@ object AndroidDeviceUtils {
         }
     }
 
-    private fun readVintfKeyMintVersion(): VintfKeyMintVersion? {
+    /**
+     * KeyMint version for the StrongBox ("strongbox" instance). Null when the device has
+     * no StrongBox KeyMint HAL declared; callers must then not synthesize one.
+     */
+    private val vintfStrongBoxKeyMintVersion: VintfKeyMintVersion? by lazy {
+        readVintfKeyMintVersion(SECURITY_LEVEL_STRONGBOX).also { version ->
+            if (version != null) {
+                SystemLogger.info(
+                    "Using StrongBox KeyMint version from VINTF: " +
+                        "attestation=${version.attestationVersion}, source=${version.sourcePath}"
+                )
+            } else {
+                SystemLogger.debug("No StrongBox KeyMint VINTF declaration found")
+            }
+        }
+    }
+
+    /** Highest KeyMint version declared in VINTF for [securityLevel], or null. */
+    private fun readVintfKeyMintVersion(securityLevel: Int): VintfKeyMintVersion? {
         val files = linkedMapOf<String, File>()
 
         VINTF_MANIFEST_DIRS.forEach { path ->
@@ -550,9 +586,24 @@ object AndroidDeviceUtils {
             }
         }
 
+        // Scan APEX-mounted VINTF fragments (e.g. com.android.hardware.* APEXes can
+        // carry their own HAL manifests under etc/vintf). Only directories are
+        // interesting here; the per-APEX manifest.xml file lives inside them.
+        runCatching {
+                File(APEX_VINTF_GLOB).listFiles { f -> f.isDirectory }?.forEach { apexDir ->
+                    val vintfDir = File(apexDir, "etc/vintf")
+                    if (vintfDir.isDirectory) {
+                        vintfDir
+                            .listFiles { f -> f.isFile && f.name.endsWith(".xml", ignoreCase = true) }
+                            ?.forEach { files[it.absolutePath] = it }
+                    }
+                }
+            }
+            .onFailure { SystemLogger.debug("Unable to scan APEX VINTF dirs: ${it.message}") }
+
         return files.values
             .flatMap { file ->
-                runCatching { parseKeyMintVersions(file) }
+                runCatching { parseKeyMintVersions(file, securityLevel) }
                     .getOrElse { throwable ->
                         SystemLogger.debug(
                             "Unable to parse KeyMint VINTF ${file.absolutePath}: ${throwable.message}"
@@ -563,7 +614,11 @@ object AndroidDeviceUtils {
             .maxByOrNull { it.attestationVersion }
     }
 
-    private fun parseKeyMintVersions(file: File): List<VintfKeyMintVersion> {
+    /** KeyMint/Keymaster versions a manifest declares for [securityLevel]'s instance. */
+    private fun parseKeyMintVersions(
+        file: File,
+        securityLevel: Int,
+    ): List<VintfKeyMintVersion> {
         val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
         val root = document.documentElement ?: return emptyList()
 
@@ -580,7 +635,7 @@ object AndroidDeviceUtils {
 
             when (halName) {
                 KEYMINT_HAL_NAME ->
-                    if (hasDefaultInstance(fqnames, interfaces, KEYMINT_INTERFACE_NAME)) {
+                    if (hasInstance(fqnames, interfaces, KEYMINT_INTERFACE_NAME, securityLevel)) {
                         versions.mapNotNull { version ->
                             version
                                 .toIntOrNull()
@@ -598,9 +653,14 @@ object AndroidDeviceUtils {
                         emptyList()
                     }
                 KEYMASTER_HAL_NAME ->
-                    if (hasDefaultInstance(fqnames, interfaces, KEYMASTER_INTERFACE_NAME)) {
+                    if (hasInstance(fqnames, interfaces, KEYMASTER_INTERFACE_NAME, securityLevel)) {
+                        // <version> and <interface> declarations are shared by every
+                        // instance in the HAL element; FQNames are per-instance, so only
+                        // take versions from FQNames naming the requested instance.
+                        val matchingFqnames =
+                            fqnames.filter { fqname -> fqnameMatches(fqname, KEYMASTER_INTERFACE_NAME, securityLevel) }
                         (versions.flatMap(::expandHidlVersions) +
-                                fqnames.mapNotNull(::versionFromFqname))
+                                matchingFqnames.mapNotNull(::versionFromFqname))
                             .distinct()
                             .mapNotNull { version ->
                                 expectedLegacyVersions(version)?.let { expected ->
@@ -638,11 +698,30 @@ object AndroidDeviceUtils {
         fqnames: List<String>,
         interfaces: Map<String, Set<String>>,
         interfaceName: String,
+    ): Boolean = hasInstance(fqnames, interfaces, interfaceName, SECURITY_LEVEL_TEE)
+
+    /**
+     * Whether the HAL declaration covers the instance matching [securityLevel]: "default"
+     * for the TEE, "strongbox" for StrongBox. Mirrors libvintf's per-instance resolution so
+     * a StrongBox-only declaration (or its absence) is not mistaken for the TEE's.
+     */
+    private fun hasInstance(
+        fqnames: List<String>,
+        interfaces: Map<String, Set<String>>,
+        interfaceName: String,
+        securityLevel: Int,
     ): Boolean =
-        fqnames.any { fqname ->
-            fqname.substringAfter("::", fqname).substringBefore("/") == interfaceName &&
-                fqname.substringAfter("/", "") == DEFAULT_INSTANCE
-        } || interfaces[interfaceName]?.contains(DEFAULT_INSTANCE) == true
+        fqnames.any { fqname -> fqnameMatches(fqname, interfaceName, securityLevel) } ||
+            interfaces[interfaceName]?.contains(instanceFor(securityLevel)) == true
+
+    /** VINTF instance name for [securityLevel]. */
+    private fun instanceFor(securityLevel: Int): String =
+        if (securityLevel == SECURITY_LEVEL_STRONGBOX) STRONGBOX_INSTANCE else DEFAULT_INSTANCE
+
+    /** Whether [fqname] names [interfaceName] at [securityLevel]'s instance. */
+    private fun fqnameMatches(fqname: String, interfaceName: String, securityLevel: Int): Boolean =
+        fqname.substringAfter("::", fqname).substringBefore("/") == interfaceName &&
+            fqname.substringAfter("/", "") == instanceFor(securityLevel)
 
     private fun versionFromFqname(fqname: String): String? =
         FQNAME_VERSION_REGEX.find(fqname)?.groupValues?.getOrNull(1)
@@ -663,6 +742,8 @@ object AndroidDeviceUtils {
         return (firstMinor..lastMinor).map { minor -> "$major.$minor" }
     }
 
+    private const val SDK_37 = 37
+
     private val VINTF_MANIFEST_DIRS =
         listOf(
             "/system/etc/vintf/manifest",
@@ -679,11 +760,15 @@ object AndroidDeviceUtils {
             "/vendor/etc/vintf/manifest.xml",
             "/odm/etc/vintf/manifest.xml",
         )
+    // VINTF fragments shipped inside APEXes. /apex/* is only globbed at read time
+    // because the set of mounted APEXes varies per device and boot state.
+    private const val APEX_VINTF_GLOB = "/apex"
     private const val KEYMINT_HAL_NAME = "android.hardware.security.keymint"
     private const val KEYMASTER_HAL_NAME = "android.hardware.keymaster"
     private const val KEYMINT_INTERFACE_NAME = "IKeyMintDevice"
     private const val KEYMASTER_INTERFACE_NAME = "IKeymasterDevice"
     private const val DEFAULT_INSTANCE = "default"
+    private const val STRONGBOX_INSTANCE = "strongbox"
     private val FQNAME_VERSION_REGEX = Regex("^@([0-9]+(?:\\.[0-9]+)?)::")
     private val HIDL_VERSION_RANGE_REGEX = Regex("^([0-9]+)\\.([0-9]+)-([0-9]+)$")
 

@@ -60,6 +60,10 @@ data class KeyMintAttestation(
     val minMacLength: Int?,
     val macLength: Int? = null,
     val rsaOaepMgfDigest: List<Int>,
+    // KeyMint v5 (Android 17). Present only when the request carries Tag.ML_DSA_VARIANT;
+    // null for every other key type. We never generate ML-DSA keys ourselves, but parsing
+    // must tolerate the tag so an ML-DSA request can fall through to the real TEE.
+    val mlDsaVariant: Int? = null,
 ) {
     /** Secondary constructor that populates the fields by parsing an array of `KeyParameter`. */
     constructor(
@@ -137,6 +141,8 @@ data class KeyMintAttestation(
         minMacLength = params.findInteger(Tag.MIN_MAC_LENGTH),
         macLength = params.findInteger(Tag.MAC_LENGTH),
         rsaOaepMgfDigest = params.findAllDigests(Tag.RSA_OAEP_MGF_DIGEST),
+        // KeyMint v5: enum-valued tag carried in its own KeyParameterValue union slot.
+        mlDsaVariant = params.findMlDsaVariant(Tag.ML_DSA_VARIANT),
     ) {
         // Log all parsed parameters for debugging purposes.
         params.forEach { KeyMintParameterLogger.logParameter(it) }
@@ -197,6 +203,12 @@ private fun Array<KeyParameter>.findAllDigests(tag: Int): List<Int> =
 private fun Array<KeyParameter>.findBoolean(tag: Int): Boolean? =
     if (this.any { it.tag == tag }) true else null
 
+/** Maps to AOSP field = MlDsaVariant (KeyMint v5). Null on pre-v5 runtimes. */
+private fun Array<KeyParameter>.findMlDsaVariant(tag: Int): Int? =
+    this.find { it.tag == tag }?.value?.let { value ->
+        runCatching { value.mlDsaVariant }.getOrNull()
+    }
+
 private fun Array<KeyParameter>.deriveKeySizeFromCurve(): Int {
     val curveId = this.find { it.tag == Tag.EC_CURVE }?.value?.ecCurve ?: return 0
     return when (curveId) {
@@ -225,7 +237,9 @@ private fun Array<KeyParameter>.deriveEcCurveName(): String {
             EcCurve.P_256 -> "secp256r1"
             EcCurve.P_384 -> "secp384r1"
             EcCurve.P_521 -> "secp521r1"
-            else -> throw IllegalArgumentException("Unknown EC curve: $curveId")
+            // Unknown / future curve (e.g. an ML-DSA request carrying an unrelated
+            // EC_CURVE tag): don't crash parsing; the key isn't ours to forge anyway.
+            else -> "secp256r1"
         }
     }
 

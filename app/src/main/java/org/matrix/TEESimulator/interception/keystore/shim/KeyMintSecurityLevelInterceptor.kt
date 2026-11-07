@@ -224,15 +224,17 @@ class KeyMintSecurityLevelInterceptor(
         } else if (code == GENERATE_KEY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
-            val metadata: KeyMetadata =
-                reply.readTypedObject(KeyMetadata.CREATOR)
-                    ?: return TransactionResult.SkipTransaction
-
+            // keystore2 replaced the alias; drop the old cached key before any early return.
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
             val keyDescriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
             val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+            cleanupKeyData(keyId)
+
+            val metadata: KeyMetadata =
+                reply.readTypedObject(KeyMetadata.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
 
             val originalChain = CertificateHelper.getCertificateChain(metadata)
             if (originalChain == null || originalChain.size <= 1) {
@@ -240,7 +242,6 @@ class KeyMintSecurityLevelInterceptor(
                 // Without this, the cached attested path returns in ~1ms while
                 // the forwarded non-attested path takes ~1.5ms, and
                 // TimingSideChannelProbe flags the 1.55x ratio.
-                cleanupKeyData(keyId)
                 teeResponses[keyId] =
                     KeyEntryResponse().apply {
                         this.metadata = metadata
@@ -280,7 +281,6 @@ class KeyMintSecurityLevelInterceptor(
             // PATCH decode point: the chain we rewrote onto a real TEE generateKey reply.
             AttestationDossier.log(callingUid, txId, "PATCH", newChain.asList())
 
-            cleanupKeyData(keyId)
             patchedChains[keyId] = newChain
             teeResponses[keyId] =
                 KeyEntryResponse().apply {
@@ -706,11 +706,10 @@ class KeyMintSecurityLevelInterceptor(
 
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
 
-                // keystore2 generateKey replaces an existing alias; drop any cached chain from a
-                // prior generation on it so a later getKeyEntry serves THIS key, never a stale
-                // FORGE (an attest-key-mode leaf cached, then re-generated without an attest key,
-                // otherwise resurfaces and breaks the app's reassembled chain).
-                if (generatedKeys.containsKey(keyId)) cleanupKeyData(keyId)
+                // keystore2 generateKey replaces an existing alias, so any cached chain from a
+                // prior generation must go, but only once the replacement exists: the forge
+                // path cleans up in doSoftwareKeyGen, forwarded requests in onPostTransact on
+                // success. A forwarded request the real keystore rejects keeps the old key.
 
                 // Device-ID attestation must be forged, not patched: the real TEE returns
                 // CANNOT_ATTEST_IDS, so there is no real chain to patch — only a synthetic one
@@ -720,21 +719,32 @@ class KeyMintSecurityLevelInterceptor(
                 // attest RSA in the TEE yet not in StrongBox, so the probe must match the request.
                 // Devices that can attest keep their genuine chain via PATCH, which strict callers
                 // accept where a forgery is rejected.
+                // An unknown EC curve has no keybox path: forging would substitute a P-256
+                // key under a chain naming the requested curve. ML-DSA has no software
+                // generator at all. Hand both to the real TEE.
+                val forwardToTee =
+                    parsedParams.algorithm == Algorithm.ML_DSA ||
+                        (parsedParams.algorithm == Algorithm.EC &&
+                            parsedParams.ecCurve != null &&
+                            parsedParams.ecCurve !in KNOWN_EC_CURVES)
+
                 val strongBox = securityLevel == SecurityLevel.STRONGBOX
                 val forceGenerate =
-                    oversized ||
-                        ConfigurationManager.shouldGenerate(callingUid) ||
-                        isAttestKeyRequest ||
-                        attestationKey != null ||
-                        hasDeviceIdAttestation ||
-                        (ConfigurationManager.isAutoMode(callingUid) &&
-                            parsedParams.attestationChallenge != null &&
-                            when (parsedParams.algorithm) {
-                                Algorithm.RSA ->
-                                    !DeviceAttestationService.isRsaAttestable(strongBox)
-                                Algorithm.EC -> !DeviceAttestationService.isEcAttestable(strongBox)
-                                else -> false
-                            })
+                    !forwardToTee &&
+                        (oversized ||
+                            ConfigurationManager.shouldGenerate(callingUid) ||
+                            isAttestKeyRequest ||
+                            attestationKey != null ||
+                            hasDeviceIdAttestation ||
+                            (ConfigurationManager.isAutoMode(callingUid) &&
+                                parsedParams.attestationChallenge != null &&
+                                when (parsedParams.algorithm) {
+                                    Algorithm.RSA ->
+                                        !DeviceAttestationService.isRsaAttestable(strongBox)
+                                    Algorithm.EC ->
+                                        !DeviceAttestationService.isEcAttestable(strongBox)
+                                    else -> false
+                                }))
 
                 SystemLogger.trace {
                     "[TRACE-$txId] dispatch: forceGen=$forceGenerate hasChallenge=${challenge != null} isSymmetric=$isSymmetric isAttestKey=$isAttestKeyRequest"
@@ -759,7 +769,6 @@ class KeyMintSecurityLevelInterceptor(
                     }
                     else -> {
                         logProbe("PASSTHROUGH")
-                        cleanupKeyData(keyId)
                         TransactionResult.Continue
                     }
                 }
@@ -1512,6 +1521,9 @@ class KeyMintSecurityLevelInterceptor(
         private const val MAX_CONCURRENT_OPS_PER_UID = 15
         private const val STRONGBOX_MAX_CONCURRENT_OPS = 4
         private const val STRONGBOX_OP_WINDOW_NS = 10_000_000_000L // 10s
+
+        private val KNOWN_EC_CURVES =
+            setOf(EcCurve.P_224, EcCurve.P_256, EcCurve.P_384, EcCurve.P_521, EcCurve.CURVE_25519)
 
         private fun isStrongBoxCapable(params: KeyMintAttestation): Boolean =
             when (params.algorithm) {

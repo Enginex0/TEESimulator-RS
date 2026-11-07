@@ -21,6 +21,8 @@ public final class KeyParameterValue implements Parcelable {
     public static final int origin = 6;
     public static final int paddingMode = 3;
     public static final int securityLevel = 9;
+    // KeyMint v5 (Android 17). Next union discriminant after blob=14.
+    public static final int mlDsaVariant = 15;
     public static final Creator<KeyParameterValue> CREATOR = new Creator<KeyParameterValue>() {
         @Override
         public KeyParameterValue createFromParcel(Parcel in) {
@@ -98,6 +100,11 @@ public final class KeyParameterValue implements Parcelable {
     }
 
     public static KeyParameterValue blob(byte[] _value) {
+        throw new UnsupportedOperationException("STUB!");
+    }
+
+    /** KeyMint v5 ML-DSA variant union member. */
+    public static KeyParameterValue mlDsaVariant(int _value) {
         throw new UnsupportedOperationException("STUB!");
     }
 
@@ -222,6 +229,16 @@ public final class KeyParameterValue implements Parcelable {
     }
 
     public void setBlob(byte[] _value) {
+        throw new UnsupportedOperationException("STUB!");
+    }
+
+    /** Returns the ML-DSA variant. */
+    public int getMlDsaVariant() {
+        throw new UnsupportedOperationException("STUB!");
+    }
+
+    /** Sets the ML-DSA variant. */
+    public void setMlDsaVariant(int _value) {
         throw new UnsupportedOperationException("STUB!");
     }
 

@@ -3,6 +3,29 @@
 
 ---
 
+## TEESimulator-RS v6.1.0
+
+Android 17 / KeyMint v5 support. Closes the version-reporting gaps that made forged
+attestations inconsistent with the device on Android 17, which STRONG integrity checks
+can cross-verify.
+
+### Android 17 / KeyMint v5
+- `osVersion` now reports 170000 on SDK 37 (was pinned to 160000 for any unmapped SDK).
+  Unmapped future SDKs derive `(SDK-20)*10000` instead of a hardcoded release.
+- `attestVersion` / `keymasterVersion` now report 500 (KeyMint 5.0) on SDK 37 (was 400).
+- VINTF parsing now scans APEX-mounted fragments under `/apex/*/etc/vintf`, matching how
+  libvintf assembles the device manifest.
+- VINTF resolution is per-instance: the TEE reads the `default` instance and StrongBox
+  reads the `strongbox` instance, so a StrongBox declaration (or its absence) no longer
+  contaminates the TEE version, and vice versa.
+
+### KeyMint v5 tolerance
+- Stub `Algorithm` gains `ML_DSA = 4`; stub `Tag` gains `ML_DSA_VARIANT`.
+- `KeyParameterValue` stub gains the `mlDsaVariant` union member (tag 15).
+- `KeyMintAttestation` parses `ML_DSA_VARIANT` without throwing. ML-DSA keys are never
+  forged — a request for one falls through to the real TEE as before.
+- An unrecognized EC curve no longer crashes attestation parsing.
+
 ## TEESimulator-RS v6.0.1-307
 
 Fixes five gaps in the module's TEE key-operation and attestation emulation. Two of them fix crashes in real app crypto on a broken-TEE device: any app using an AndroidKeyStore HMAC key or an RSA-OAEP-SHA256 key was throwing. This is a beta; the confirmation logs are in the debug build only, and nothing is field-verified yet.
