@@ -1695,11 +1695,18 @@ class KeyMintSecurityLevelInterceptor(
 
         /** Clears every synthetic key owned by [uid] (maintenance.clearNamespace, Domain.APP). */
         fun clearNamespaceKeys(uid: Int) {
-            val victims = generatedKeys.keys.filter { it.uid == uid }
+            // keystore2 wipes the uid's real keys too, so cached TEE responses and patched
+            // chains must go with the synthetic ones. Otherwise getKeyEntry keeps serving a
+            // dead KEY_ID and every createOperation on it fails with KEY_NOT_FOUND
+            // (KeyPermanentlyInvalidatedException) after the user clears app data.
+            val victims =
+                (generatedKeys.keys + teeResponses.keys + patchedChains.keys)
+                    .filter { it.uid == uid }
+                    .toSet()
             if (victims.isEmpty()) return
             victims.forEach { cleanupKeyData(it) } // also purges grants + persistence
             SystemLogger.info(
-                "Cleared ${victims.size} synthetic keys for uid=$uid (maintenance.clearNamespace)"
+                "Cleared ${victims.size} cached keys for uid=$uid (maintenance.clearNamespace)"
             )
         }
 
