@@ -1,0 +1,33 @@
+This project is licensed under the GNU General Public License v3.0
+(see LICENSE file).
+
+Source code based on:
+--------------
+
+https://github.com/5ec1cff/TrickyStore/commit/3a515c5fe1ce4c94d5424305afe2eaf4812a635d
+https://github.com/beakthoven/TrickyStoreOSS/commit/8625be6ce55c3ef0f2219f301daec23202017bc0
+
+
+Third-party components:
+-----------------------
+
+1. Portions of this project include code from the Android Open Source Project (AOSP) located in:
+       app/src/main/cpp/external/AOSP/
+   The corresponding Apache License 2.0 is provided in:
+       app/src/main/cpp/external/AOSP/LICENSE
+
+2. This project includes the LSPlt library as a Git submodule located in:
+       app/src/main/cpp/external/LSPlt/
+   This submodule now uses a fork maintained at:
+        https://github.com/JingMatrix/LSPlt
+   LSPlt is licensed under the GNU Lesser General Public License v3.0 (LGPLv3).
+   The license can be viewed at:
+       https://github.com/JingMatrix/LSPlt/blob/master/LICENSE
+
+3. Portions of this project include binder header file from the Linux kernel UAPI,
+   located in:
+       app/src/main/cpp/external/linux-kernel/include/android/binder.h
+   The file is licensed under:
+       GNU General Public License v2.0 WITH Linux-syscall-note exception.
+   Information about the exception:
+       https://spdx.org/licenses/Linux-syscall-note.html

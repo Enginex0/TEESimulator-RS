@@ -1,0 +1,169 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+    paths-ignore: [ '**.md' ]
+  pull_request:
+    branches: [ "main" ]
+    paths-ignore: [ '**.md' ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: 'gradle'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            native-certgen/target
+          key: rust-${{ runner.os }}-${{ hashFiles('native-certgen/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Install cargo-ndk
+        run: command -v cargo-ndk || cargo install cargo-ndk
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}
+            ccache-${{ runner.os }}-
+            ccache-
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build with Gradle
+        run: |
+          chmod +x ./gradlew
+          ./gradlew zipRelease zipDebug -Porg.gradle.parallel=true -Porg.gradle.vfs.watch=true -Dorg.gradle.jvmargs=-Xmx2048m
+
+      - name: Read version
+        id: ver
+        run: |
+          ver=$(grep 'val verName' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          count=$(git rev-list HEAD --count)
+          echo "version=${ver}-${count}" >> "$GITHUB_OUTPUT"
+
+      - name: List build artifacts
+        run: |
+          echo "Release: $(ls out/*Release*.zip | head -1) ($(du -h out/*Release*.zip | head -1 | cut -f1))"
+          echo "Debug: $(ls out/*Debug*.zip | head -1) ($(du -h out/*Debug*.zip | head -1 | cut -f1))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TEESimulator-RS-release-zip
+          path: out/TEESimulator-RS-*-Release.zip
+          retention-days: 30
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TEESimulator-RS-debug-zip
+          path: out/TEESimulator-RS-*-Debug.zip
+          retention-days: 7
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-mappings
+          path: app/build/outputs/mapping/release
+          retention-days: 30
+          compression-level: 9
+
+  release:
+    needs: build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: ver
+        run: |
+          ver=$(grep 'val verName' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          count=$(git rev-list HEAD --count)
+          echo "version=${ver}-${count}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: TEESimulator-RS-release-zip
+          path: zips
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: TEESimulator-RS-debug-zip
+          path: zips
+
+      - name: Extract changelog
+        run: |
+          ver="${VER#v}"
+          awk "/^## TEESimulator-RS v${ver%%-*}/{flag=1; next} /^## TEESimulator-RS v/{if(flag) exit} flag" module/changelog.md > /tmp/notes.md
+          cat /tmp/notes.md
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+
+      - name: Create release
+        run: |
+          gh release delete "$VER" --yes 2>/dev/null || true
+          RELEASE=$(ls zips/*Release*.zip | head -1)
+          DEBUG=$(ls zips/*Debug*.zip | head -1)
+          gh release create "$VER" \
+            --title "$VER" \
+            --latest \
+            --notes-file /tmp/notes.md \
+            "$RELEASE" \
+            "$DEBUG"
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump update.json
+        run: |
+          COUNT=$(git rev-list HEAD --count)
+          RELEASE_NAME=$(basename zips/*Release*.zip)
+          ZIP_URL="https://github.com/${{ github.repository }}/releases/download/${VER}/${RELEASE_NAME}"
+          jq ".versionCode = $COUNT | .zipUrl = \"$ZIP_URL\"" module/update.json > /tmp/update.json
+          mv /tmp/update.json module/update.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add module/update.json
+          git diff --cached --quiet || {
+            git commit -m "chore(release): bump update.json to $VER [skip ci]"
+            git push origin HEAD:main
+          }
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
