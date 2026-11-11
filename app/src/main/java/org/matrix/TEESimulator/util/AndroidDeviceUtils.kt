@@ -262,7 +262,11 @@ object AndroidDeviceUtils {
     fun describeSources(uid: Int): String {
         val customPatchLevel = ConfigurationManager.getPatchLevelForUid(uid) != null
         val osVersionSource =
-            if (DeviceAttestationService.CachedAttestationData?.osVersion != null) "cache" else "map"
+            when {
+                romOsVersion() != null -> "rom"
+                DeviceAttestationService.CachedAttestationData?.osVersion != null -> "cache"
+                else -> "map"
+            }
         return "osVersion=$osVersion(src=$osVersionSource) " +
             "osPatch=${getPatchLevel(uid)} vendorPatch=${getVendorPatchLevelLong(uid)} " +
             "bootPatch=${getBootPatchLevelLong(uid)} customPatchLevel=$customPatchLevel " +
@@ -421,9 +425,26 @@ object AndroidDeviceUtils {
             Build.VERSION_CODES.Q to 100000,
         )
 
+    // Derive osVersion from the running ROM's release string (what stock AOSP keymaster does),
+    // e.g. "17" -> 170000, "12.1" -> 120100. On Samsung devices the cached hardware-TEE value is
+    // frozen at the vendor's shipping Android version (e.g. 13 -> 130000) regardless of the ROM,
+    // which breaks coherence with the spoofed fingerprint; prefer the real OS release instead.
+    private fun romOsVersion(): Int? {
+        // Take the leading numeric prefix of each dotted component so suffixed releases
+        // such as "17-beta" or "12.1.0-rc1" still resolve; a non-numeric major (e.g. a
+        // preview codename) yields null and lets the caller fall back.
+        fun String.leadingInt(): Int? = takeWhile { it.isDigit() }.toIntOrNull()
+        val parts = Build.VERSION.RELEASE.split(".")
+        val major = parts.getOrNull(0)?.leadingInt() ?: return null
+        val minor = parts.getOrNull(1)?.leadingInt() ?: 0
+        val sub = parts.getOrNull(2)?.leadingInt() ?: 0
+        return major * 10000 + minor * 100 + sub
+    }
+
     val osVersion: Int
         get() =
-            DeviceAttestationService.CachedAttestationData?.osVersion
+            romOsVersion()
+                ?: DeviceAttestationService.CachedAttestationData?.osVersion
                 ?: osVersionMap[Build.VERSION.SDK_INT]
                 ?: 160000 // Default to a recent version
 
