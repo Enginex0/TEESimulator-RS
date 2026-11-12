@@ -1510,7 +1510,7 @@ class KeyMintSecurityLevelInterceptor(
         private const val KEYMINT_UNKNOWN_ERROR = -1000
         private const val SECURE_HW_COMMUNICATION_FAILED = -49
         private const val MAX_CONCURRENT_OPS_PER_UID = 15
-        private const val STRONGBOX_MAX_CONCURRENT_OPS = 4
+        private const val STRONGBOX_MAX_CONCURRENT_OPS = 32
         private const val STRONGBOX_OP_WINDOW_NS = 10_000_000_000L // 10s
 
         private fun isStrongBoxCapable(params: KeyMintAttestation): Boolean =
